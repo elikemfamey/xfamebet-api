@@ -1,0 +1,111 @@
+import { Router } from 'express';
+import { supabase } from '../../config/supabase';
+import { redis, REDIS_KEYS } from '../../config/redis';
+import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
+import { getCachedLiveScores } from '../../services/liveScoreService';
+import { buildLiveFeed } from '../../services/liveFeedService';
+
+const router = Router();
+
+// GET /matches - list all available matches with odds
+router.get('/', async (req, res) => {
+  const sport = req.query.sport as string;
+  const live = req.query.live === 'true';
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 30;
+  const offset = (page - 1) * limit;
+
+  // Try Redis cache first
+  const cacheKey = REDIS_KEYS.ALL_ODDS;
+  const cached = await redis.get(cacheKey);
+
+  if (cached && !live) {
+    const data = JSON.parse(cached);
+    return sendSuccess(res, data);
+  }
+
+  let query = supabase
+    .from('odds_feed')
+    .select('*', { count: 'exact' })
+    .eq('status', 'active')
+    .order('updated_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (sport) {
+    if (sport === 'baseball') query = query.ilike('sport', 'baseball%');
+    else query = query.eq('sport', sport);
+  }
+  if (live) query = query.not('starts_at', 'is', null).lte('starts_at', new Date().toISOString());
+
+  const { data, count } = await query;
+
+  if (!live) {
+    await redis.setex(cacheKey, 30, JSON.stringify(data));
+  }
+
+  return sendPaginated(res, data ?? [], count ?? 0, page, limit);
+});
+
+// GET /matches/live - live matches (optional ?sport= filter)
+router.get('/live', async (req, res) => {
+  const sport = req.query.sport as string | undefined;
+
+  let query = supabase
+    .from('odds_feed')
+    .select('*')
+    .eq('status', 'active')
+    .lte('starts_at', new Date().toISOString())
+    .not('sport', 'ilike', 'virtual_%')
+    .order('updated_at', { ascending: false })
+    .limit(100);
+
+  if (sport) {
+    if (sport === 'baseball') query = query.ilike('sport', 'baseball%');
+    else query = query.eq('sport', sport);
+  }
+
+  const { data } = await query;
+  return sendSuccess(res, data ?? []);
+});
+
+// GET /matches/live-feed - unified live matches (API-Football scores + Odds API odds merged)
+router.get('/live-feed', async (req, res) => {
+  const sport = (req.query.sport as string) || '';
+  const cacheKey = `live_feed:${sport}`;
+
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) return sendSuccess(res, JSON.parse(cached));
+
+    const feed = await buildLiveFeed(sport || undefined);
+    await redis.setex(cacheKey, 30, JSON.stringify(feed));
+    return sendSuccess(res, feed);
+  } catch {
+    return sendError(res, 'Failed to build live feed', 500);
+  }
+});
+
+// GET /matches/scores/live - live scores from API-Football cache
+router.get('/scores/live', async (req, res) => {
+  const scores = await getCachedLiveScores();
+  return sendSuccess(res, scores);
+});
+
+// GET /matches/:eventId/odds - all markets for an event
+router.get('/:eventId/odds', async (req, res) => {
+  const cached = await redis.get(REDIS_KEYS.LIVE_ODDS(req.params.eventId));
+  if (cached) return sendSuccess(res, JSON.parse(cached));
+
+  const { data, error } = await supabase
+    .from('odds_feed')
+    .select('*')
+    .eq('event_id', req.params.eventId)
+    .eq('status', 'active');
+
+  if (error) return sendError(res, 'Failed to fetch odds', 500);
+
+  await redis.setex(REDIS_KEYS.LIVE_ODDS(req.params.eventId), 15, JSON.stringify(data));
+  return sendSuccess(res, data ?? []);
+});
+
+export default router;
