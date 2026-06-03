@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
+import multer from 'multer';
 import { supabase } from '../../config/supabase';
 import { WalletService } from '../../services/walletService';
 import { NotificationService } from '../../services/notificationService';
@@ -10,6 +11,15 @@ import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { paymentLimiter } from '../../middleware/rateLimiter';
 import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 3 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Only JPG, PNG and WebP images are allowed'));
+  },
+});
 
 const router = Router();
 
@@ -21,9 +31,18 @@ const paystackInitSchema = z.object({
 const manualMomoSchema = z.object({
   amount: z.number().min(5),
   provider: z.enum(['momo_mtn', 'momo_telecel', 'momo_airteltigo']),
-  phone_number: z.string(),
-  transaction_id: z.string(),
+  phone_number: z.string().optional(),
+  sender_name: z.string().min(1),
+  transaction_id: z.string().optional(),
   screenshot_url: z.string().optional(),
+});
+
+const payoutSettingsSchema = z.object({
+  method_type: z.enum(['momo_mtn', 'momo_telecel', 'momo_airteltigo', 'ng_bank_transfer']),
+  account_name: z.string().min(1),
+  account_number: z.string().min(1),
+  bank_name: z.string().optional(),
+  is_default: z.boolean().optional().default(true),
 });
 
 const ngBankSchema = z.object({
@@ -122,16 +141,17 @@ router.post('/paystack/webhook', async (req, res) => {
 
 // POST /payments/manual-momo/deposit
 router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(manualMomoSchema), async (req, res) => {
-  const { amount, provider, phone_number, transaction_id, screenshot_url } = req.body;
+  const { amount, provider, phone_number, sender_name, transaction_id, screenshot_url } = req.body;
 
   await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
     amount,
     currency: 'GHS',
     payment_provider: provider,
-    transaction_id,
-    screenshot_url,
-    account_number: phone_number,
+    transaction_id: transaction_id || null,
+    screenshot_url: screenshot_url || null,
+    account_number: phone_number || null,
+    account_name: sender_name,
     status: 'pending',
   });
 
@@ -179,6 +199,104 @@ router.post('/usdt-trc20/deposit', authenticate, paymentLimiter, validateBody(us
 // GET /payments/crypto-address
 router.get('/crypto-address', authenticate, async (_req, res) => {
   return sendSuccess(res, { address: env.CRYPTO_WALLET_ADDRESS, network: 'TRC20' });
+});
+
+// GET /payments/payment-info — company collection details for deposit page
+router.get('/payment-info', authenticate, async (_req, res) => {
+  return sendSuccess(res, {
+    momo: {
+      network: env.COMPANY_MOMO_NETWORK,
+      name: env.COMPANY_MOMO_NAME,
+      number: env.COMPANY_MOMO_NUMBER,
+    },
+    bank: {
+      bank_name: env.COMPANY_BANK_NAME || null,
+      account_name: env.COMPANY_BANK_ACCOUNT_NAME || null,
+      account_number: env.COMPANY_BANK_ACCOUNT_NUMBER || null,
+    },
+    crypto: {
+      usdt_trc20: env.CRYPTO_WALLET_ADDRESS,
+    },
+    minimums: { crypto_usd: 30, momo_ghs: 300, bank_ghs: 300 },
+    quick_picks: {
+      crypto_usd: [30, 50, 100, 200, 500],
+      momo_ghs: [300, 500, 1000, 1500, 2000],
+    },
+  });
+});
+
+// POST /payments/upload-screenshot
+router.post('/upload-screenshot', authenticate, upload.single('screenshot'), async (req, res) => {
+  if (!req.file) return sendError(res, 'No file provided', 400);
+  const ext = req.file.originalname.split('.').pop() ?? 'jpg';
+  const path = `deposit-screenshots/${req.user!.id}/${Date.now()}.${ext}`;
+
+  const { data, error } = await supabase.storage
+    .from('screenshots')
+    .upload(path, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+
+  if (error) return sendError(res, 'Upload failed: ' + error.message, 500);
+
+  const { data: { publicUrl } } = supabase.storage.from('screenshots').getPublicUrl(data.path);
+  return sendSuccess(res, { url: publicUrl });
+});
+
+// GET /payments/payout-settings
+router.get('/payout-settings', authenticate, async (req, res) => {
+  const { data } = await supabase
+    .from('payment_methods')
+    .select('*')
+    .eq('user_id', req.user!.id)
+    .eq('status', 'active')
+    .order('is_default', { ascending: false });
+  return sendSuccess(res, data ?? []);
+});
+
+// POST /payments/payout-settings
+router.post('/payout-settings', authenticate, validateBody(payoutSettingsSchema), async (req, res) => {
+  const { method_type, account_name, account_number, bank_name, is_default } = req.body;
+
+  if (is_default) {
+    await supabase
+      .from('payment_methods')
+      .update({ is_default: false })
+      .eq('user_id', req.user!.id);
+  }
+
+  const { data: existing } = await supabase
+    .from('payment_methods')
+    .select('id')
+    .eq('user_id', req.user!.id)
+    .eq('method_type', method_type)
+    .single();
+
+  if (existing) {
+    await supabase.from('payment_methods').update({
+      account_name, account_number, bank_name: bank_name || null, is_default: is_default ?? true,
+    }).eq('id', existing.id);
+  } else {
+    await supabase.from('payment_methods').insert({
+      user_id: req.user!.id,
+      method_type,
+      account_name,
+      account_number,
+      bank_name: bank_name || null,
+      is_default: is_default ?? true,
+      status: 'active',
+    });
+  }
+
+  return sendSuccess(res, { message: 'Payout settings saved' });
+});
+
+// DELETE /payments/payout-settings/:id
+router.delete('/payout-settings/:id', authenticate, async (req, res) => {
+  await supabase
+    .from('payment_methods')
+    .update({ status: 'inactive' })
+    .eq('id', req.params.id)
+    .eq('user_id', req.user!.id);
+  return sendSuccess(res, { message: 'Payout method removed' });
 });
 
 // POST /payments/withdraw
