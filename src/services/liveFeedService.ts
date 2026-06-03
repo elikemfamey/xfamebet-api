@@ -68,16 +68,23 @@ function formatKickoffAsStatus(isoString: string): string {
 }
 
 export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
-  const [liveScores, oddsResult] = await Promise.all([
+  const now = new Date().toISOString();
+
+  const [liveScores, oddsResult, scriptedResult] = await Promise.all([
     getCachedLiveScores(),
     supabase
       .from('odds_feed')
       .select('event_id, event_name, market_type, selection, odds_value, sport, league, starts_at')
       .eq('status', 'active')
-      .lte('starts_at', new Date().toISOString())
+      .lte('starts_at', now)
       .not('sport', 'ilike', 'virtual_%')
       .order('updated_at', { ascending: false })
       .limit(500),
+    supabase
+      .from('simulated_matches')
+      .select('id, team_a, team_b, team_a_score, team_b_score, current_minute, sport, competition, league_name, home_logo, away_logo, started_at')
+      .eq('is_scripted', true)
+      .eq('status', 'live'),
   ]);
 
   const allOdds: OddsRow[] = oddsResult.data ?? [];
@@ -141,7 +148,43 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     }
   }
 
-  // 2. Process Odds API events not matched to any API-Football fixture
+  // 2. Scripted live matches — appear as real matches with live scores
+  for (const match of scriptedResult.data ?? []) {
+    const scriptEventId = `sim:${match.id}`;
+
+    if (sport && match.sport !== sport) continue;
+
+    const matchOddsRows = byEvent.get(scriptEventId) ?? [];
+    matchedEventIds.add(scriptEventId); // prevent duplicate in step 3
+
+    const h2h     = matchOddsRows.filter(r => r.market_type === 'match_winner');
+    const homeOdds = h2h.find(r => r.selection === 'home')?.odds_value;
+    const drawOdds = h2h.find(r => r.selection === 'draw')?.odds_value;
+    const awayOdds = h2h.find(r => r.selection === 'away')?.odds_value;
+    const markets  = matchOddsRows.filter(r => r.market_type !== 'match_winner').length;
+
+    const minuteLabel = (match.current_minute ?? 0) > 0 ? `${match.current_minute}'` : 'LIVE';
+
+    result.push({
+      eventId:     scriptEventId,
+      oddsEventId: scriptEventId,
+      league:      match.competition ?? match.league_name ?? 'XfameBet League',
+      sport:       match.sport ?? 'football',
+      isLive:      true,
+      status:      minuteLabel,
+      home:        { name: match.team_a, logoUrl: match.home_logo ?? null },
+      away:        { name: match.team_b, logoUrl: match.away_logo ?? null },
+      homeScore:   String(match.team_a_score ?? 0),
+      awayScore:   String(match.team_b_score ?? 0),
+      odds:        [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
+      oddsLocked:  homeOdds == null,
+      markets,
+      sportKey:    match.sport ?? 'football',
+      kickedOffAt: match.started_at ?? null,
+    });
+  }
+
+  // 3. Process Odds API events not matched to any API-Football fixture or scripted match
   for (const [eventId, rows] of byEvent) {
     if (matchedEventIds.has(eventId)) continue;
 

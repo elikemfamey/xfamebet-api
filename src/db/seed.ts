@@ -87,18 +87,7 @@ async function seed() {
     email_verified: true,
   });
 
-  // Seed teams
-  const teams = [
-    { name: 'Lions FC', short_name: 'LFC', sport: 'virtual_football', strength: 7.5 },
-    { name: 'Eagles United', short_name: 'EAG', sport: 'virtual_football', strength: 6.8 },
-    { name: 'City Stars', short_name: 'CST', sport: 'virtual_football', strength: 7.2 },
-    { name: 'River Hawks', short_name: 'RHK', sport: 'virtual_football', strength: 6.5 },
-    { name: 'Thunder FC', short_name: 'THU', sport: 'virtual_football', strength: 7.0 },
-    { name: 'Blue Wolves', short_name: 'BWO', sport: 'virtual_football', strength: 6.3 },
-    { name: 'Golden Boys', short_name: 'GOL', sport: 'virtual_basketball', strength: 7.8 },
-    { name: 'Red Storm', short_name: 'RST', sport: 'virtual_basketball', strength: 7.1 },
-  ];
-  await upsertRowsByKeys('teams', teams, ['name', 'sport']);
+  // Virtual teams removed — matches are now scripted manually by admin.
 
   // Seed markets
   const markets = [
@@ -146,39 +135,7 @@ async function seed() {
     { event_id: 'ext:nba:001', event_name: 'Lakers vs Warriors', market_type: 'match_winner', selection: 'away', odds_value: 1.90, source: 'internal', sport: 'basketball', status: 'active' },
   ], ['event_id', 'market_type', 'selection']);
 
-  // Schedule a virtual match
-  const scheduled = new Date(Date.now() + 30000).toISOString();
-  const match = requireSuccess('Simulated match seed', await supabase.from('simulated_matches').insert({
-    team_a: 'Lions FC', team_b: 'Eagles United',
-    sport: 'virtual_football',
-    duration_minutes: 90,
-    league_name: 'XfameBet Virtual Premier League - Round 1',
-    team_a_strength: 7.5, team_b_strength: 6.8,
-    goal_probability: 0.03, card_probability: 0.05,
-    scheduled_at: scheduled,
-    status: 'scheduled',
-  }).select().single());
-
-  if (match) {
-    const base = {
-      event_id: `sim:${match.id}`,
-      event_name: `${match.team_a} vs ${match.team_b}`,
-      source: 'simulation',
-      sport: match.sport,
-      league: match.league_name,
-      starts_at: match.scheduled_at,
-      status: 'active',
-    };
-    await upsertRowsByKeys('odds_feed', [
-      { ...base, market_type: 'match_winner', selection: 'home', odds_value: 1.95 },
-      { ...base, market_type: 'match_winner', selection: 'draw', odds_value: 3.20 },
-      { ...base, market_type: 'match_winner', selection: 'away', odds_value: 2.04 },
-      { ...base, market_type: 'over_under', selection: 'over_2.5', odds_value: 1.85 },
-      { ...base, market_type: 'over_under', selection: 'under_2.5', odds_value: 1.95 },
-      { ...base, market_type: 'btts', selection: 'yes', odds_value: 1.75 },
-      { ...base, market_type: 'btts', selection: 'no', odds_value: 2.05 },
-    ], ['event_id', 'market_type', 'selection']);
-  }
+  // Scripted matches are created on-demand via POST /simulation/admin/create.
 
   console.log('Seeding complete!');
   console.log('');

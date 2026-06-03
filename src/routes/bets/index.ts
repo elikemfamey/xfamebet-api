@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomBytes } from 'crypto';
 import { z } from 'zod';
 import { supabase } from '../../config/supabase';
 import { WalletService } from '../../services/walletService';
@@ -8,8 +9,30 @@ import { authenticate, requireAdmin } from '../../middleware/auth';
 import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { betLimiter } from '../../middleware/rateLimiter';
+import { broadcastBetWon } from '../../socket';
 
 const router = Router();
+
+// Generates an 8-char booking code avoiding visually ambiguous chars
+function generateShareCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = randomBytes(8);
+  return Array.from(bytes).map(b => chars[b % chars.length]).join('');
+}
+
+// ── PUBLIC: look up bet by share code (no auth required) ──────────────────────
+router.get('/share/:code', async (req, res) => {
+  const code = req.params.code.toUpperCase();
+  const { data } = await supabase
+    .from('bets')
+    .select('id, share_code, odds, stake, potential_payout, bet_type, placed_at, bet_selections(event_id, event_name, market_type, selection, odds)')
+    .eq('share_code', code)
+    .single();
+
+  if (!data) return sendError(res, 'Bet code not found', 404);
+  return sendSuccess(res, data);
+});
+
 router.use(authenticate);
 
 const selectionSchema = z.object({
@@ -27,9 +50,11 @@ const placeBetSchema = z.object({
   selections: z.array(selectionSchema).min(1).max(20),
 });
 
+type PlaceBetBody = z.infer<typeof placeBetSchema>;
+
 // POST /bets/place
 router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res) => {
-  const { stake, bet_type, use_bonus, selections } = req.body;
+  const { stake, bet_type, use_bonus, selections } = req.body as PlaceBetBody;
   const userId = req.user!.id;
 
   // Check responsible gambling
@@ -81,6 +106,11 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
     return sendError(res, (err as Error).message, 400);
   }
 
+  // Generate unique share code (retry once on collision)
+  let shareCode = generateShareCode();
+  const { data: existing } = await supabase.from('bets').select('id').eq('share_code', shareCode).single();
+  if (existing) shareCode = generateShareCode();
+
   // Create bet
   const { data: bet, error: betErr } = await supabase.from('bets').insert({
     user_id: userId,
@@ -92,6 +122,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
     status: 'pending',
     bet_type,
     use_bonus,
+    share_code: shareCode,
   }).select().single();
 
   if (betErr || !bet) {
@@ -128,6 +159,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
 
   return sendSuccess(res, {
     bet_id: bet.id,
+    share_code: shareCode,
     stake,
     odds: totalOdds,
     potential_payout: potentialPayout,
@@ -179,6 +211,25 @@ router.get('/:id', async (req, res) => {
   return sendSuccess(res, data);
 });
 
+// GET /bets/admin/all (Admin only)
+router.get('/admin/all', requireAdmin, async (req, res) => {
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = 25;
+  const offset = (page - 1) * limit;
+  const status = req.query.status as string;
+
+  let query = supabase
+    .from('bets')
+    .select('*, users(username, phone), bet_selections(*)', { count: 'exact' })
+    .order('placed_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (status) query = query.eq('status', status);
+
+  const { data, count } = await query;
+  return sendPaginated(res, data ?? [], count ?? 0, page, limit);
+});
+
 // POST /bets/admin/settle (Admin only)
 router.post('/admin/settle/:id', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
@@ -195,6 +246,15 @@ router.post('/admin/settle/:id', authenticate, requireAdmin, async (req, res) =>
     await WalletService.credit(bet.user_id, bet.potential_payout, 'bet_win', undefined, undefined, `Bet won - ${id}`);
     await NotificationService.send(bet.user_id, 'bet_won', 'Bet Won!', `Congratulations! You won GHS ${bet.potential_payout}`);
     await supabase.from('bets').update({ payout: bet.potential_payout }).eq('id', id);
+
+    // Fetch wallet currency and share code for the win celebration push
+    const { data: wallet } = await supabase.from('wallets').select('currency').eq('user_id', bet.user_id).single();
+    broadcastBetWon(bet.user_id, {
+      betId: id,
+      amount: bet.potential_payout,
+      currency: wallet?.currency ?? 'GHS',
+      shareCode: bet.share_code ?? undefined,
+    });
   } else if (newStatus === 'void') {
     await WalletService.credit(bet.user_id, bet.stake, 'refund', undefined, undefined, `Bet voided - stake refunded`);
   } else {

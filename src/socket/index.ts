@@ -101,3 +101,13 @@ export function broadcastAdminAlert(message: string, data?: unknown) {
   if (!io) return;
   io.to('admin').emit('admin:alert', { message, data, timestamp: new Date().toISOString() });
 }
+
+export function broadcastBetWon(userId: string, payload: {
+  betId: string;
+  amount: number;
+  currency: string;
+  shareCode?: string;
+}) {
+  if (!io) return;
+  io.to(`user:${userId}`).emit('bet:won', payload);
+}

@@ -39,7 +39,7 @@ app.use(cors({
 }));
 
 // Middleware
-app.use(compression() as express.RequestHandler);
+app.use(compression() as unknown as express.RequestHandler);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));

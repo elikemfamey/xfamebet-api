@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { RequestHandler, Router } from 'express';
 import { z } from 'zod';
 import crypto from 'crypto';
 import multer from 'multer';
@@ -226,7 +226,7 @@ router.get('/payment-info', authenticate, async (_req, res) => {
 });
 
 // POST /payments/upload-screenshot
-router.post('/upload-screenshot', authenticate, upload.single('screenshot'), async (req, res) => {
+router.post('/upload-screenshot', authenticate, upload.single('screenshot') as unknown as RequestHandler, async (req, res) => {
   if (!req.file) return sendError(res, 'No file provided', 400);
   const ext = req.file.originalname.split('.').pop() ?? 'jpg';
   const path = `deposit-screenshots/${req.user!.id}/${Date.now()}.${ext}`;
@@ -375,16 +375,41 @@ router.get('/admin/deposits', authenticate, requireAdmin, async (req, res) => {
   const provider = req.query.provider as string;
   const offset = (page - 1) * limit;
 
+  // Try relational join first; if FK isn't declared in schema cache, fall back to manual enrichment
   let query = supabase
     .from('deposit_requests')
-    .select('*, users(username, email)', { count: 'exact' })
+    .select('*, users(username, email, phone)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
   if (status) query = query.eq('status', status);
   if (provider) query = query.eq('payment_provider', provider);
 
-  const { data, count } = await query;
+  let { data, count, error } = await query;
+
+  if (error) {
+    // FK join not available — fetch deposits and enrich user data manually
+    let fallback = supabase
+      .from('deposit_requests')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (status) fallback = fallback.eq('status', status);
+    if (provider) fallback = fallback.eq('payment_provider', provider);
+    const { data: fbData, count: fbCount } = await fallback;
+
+    if (fbData && fbData.length > 0) {
+      const userIds = [...new Set(fbData.map((d: Record<string, unknown>) => d.user_id as string))];
+      const { data: users } = await supabase
+        .from('users').select('id, username, email, phone').in('id', userIds);
+      const userMap = Object.fromEntries((users ?? []).map((u: Record<string, unknown>) => [u.id, u]));
+      data = fbData.map((d: Record<string, unknown>) => ({ ...d, users: userMap[d.user_id as string] ?? null }));
+    } else {
+      data = fbData ?? [];
+    }
+    count = fbCount;
+  }
+
   return sendPaginated(res, data ?? [], count ?? 0, page, limit);
 });
 
@@ -437,13 +462,35 @@ router.get('/admin/withdrawals', authenticate, requireAdmin, async (req, res) =>
 
   let query = supabase
     .from('withdrawal_requests')
-    .select('*, users(username, email)', { count: 'exact' })
+    .select('*, users(username, email, phone)', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
   if (status) query = query.eq('status', status);
 
-  const { data, count } = await query;
+  let { data, count, error } = await query;
+
+  if (error) {
+    let fallback = supabase
+      .from('withdrawal_requests')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (status) fallback = fallback.eq('status', status);
+    const { data: fbData, count: fbCount } = await fallback;
+
+    if (fbData && fbData.length > 0) {
+      const userIds = [...new Set(fbData.map((d: Record<string, unknown>) => d.user_id as string))];
+      const { data: users } = await supabase
+        .from('users').select('id, username, email, phone').in('id', userIds);
+      const userMap = Object.fromEntries((users ?? []).map((u: Record<string, unknown>) => [u.id, u]));
+      data = fbData.map((d: Record<string, unknown>) => ({ ...d, users: userMap[d.user_id as string] ?? null }));
+    } else {
+      data = fbData ?? [];
+    }
+    count = fbCount;
+  }
+
   return sendPaginated(res, data ?? [], count ?? 0, page, limit);
 });
 

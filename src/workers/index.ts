@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { supabase } from '../config/supabase';
 import { ingestAllOdds } from '../services/oddsIngestionService';
 import { fetchAndCacheLiveScores } from '../services/liveScoreService';
+import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { logger } from '../utils/logger';
 
 export function startWorkers() {
@@ -62,6 +63,30 @@ export function startWorkers() {
         .lt('expires_at', new Date().toISOString());
     } catch (err) {
       logger.error('Bonus grant expiry error', { err });
+    }
+  });
+
+  // Auto-start scripted matches at their scheduled time (checks every minute)
+  cron.schedule('* * * * *', async () => {
+    try {
+      const { data: due } = await supabase
+        .from('simulated_matches')
+        .select('id')
+        .eq('status', 'scheduled')
+        .eq('is_scripted', true)
+        .lte('scheduled_at', new Date().toISOString());
+
+      for (const match of due ?? []) {
+        if (!ScriptedMatchEngine.isActive(match.id)) {
+          await supabase.from('simulated_matches')
+            .update({ status: 'live', started_at: new Date().toISOString() })
+            .eq('id', match.id);
+          await ScriptedMatchEngine.startMatch(match.id);
+          logger.info(`Auto-started scripted match ${match.id}`);
+        }
+      }
+    } catch (err) {
+      logger.error('Scripted match auto-start error', { err });
     }
   });
 
