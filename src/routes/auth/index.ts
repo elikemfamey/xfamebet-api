@@ -441,7 +441,9 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
       }
     }
 
-    await FraudService.emitEvent(user.id, 'registration', { ip: req.ip, device: req.headers['user-agent'], phone });
+    FraudService.emitEvent(user.id, 'registration', { ip: req.ip, device: req.headers['user-agent'], phone }).catch(
+      (err) => logger.error('register-phone fraud event failed', { err })
+    );
 
     let smsSent = true;
     try {

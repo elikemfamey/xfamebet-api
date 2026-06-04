@@ -23,8 +23,8 @@ const at = AfricasTalking({
 const sms = at.SMS;
 
 export async function sendOtpSms(phone: string, otp: string): Promise<void> {
-  if (env.NODE_ENV !== 'production') {
-    logger.info('sms_skipped_dev', { phone, otp });
+  if (env.NODE_ENV !== 'production' || !env.AT_API_KEY) {
+    logger.info('sms_skipped', { phone, otp, reason: env.NODE_ENV !== 'production' ? 'dev' : 'no_api_key' });
     return;
   }
 
