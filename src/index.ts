@@ -23,6 +23,7 @@ import simulationRoutes from './routes/simulation';
 import fraudRoutes from './routes/fraud';
 import matchRoutes from './routes/matches';
 import teamLogoRoutes from './routes/teams';
+import crashRoutes from './routes/crash';
 
 validateEnv();
 
@@ -61,6 +62,7 @@ app.use('/api/affiliates', affiliateRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/simulation', simulationRoutes);
 app.use('/api/fraud', fraudRoutes);
+app.use('/api/crash', crashRoutes);
 
 // 404 and error handling
 app.use(notFoundHandler);
