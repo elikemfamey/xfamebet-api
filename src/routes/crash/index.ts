@@ -1,75 +1,66 @@
 import { Router, Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import jwt from 'jsonwebtoken';
 import { authenticate } from '../../middleware/auth';
 import { WalletService } from '../../services/walletService';
 import { redis } from '../../config/redis';
+import { env } from '../../config/env';
 import { sendSuccess, sendError } from '../../utils/response';
 
 const router = Router();
+const GROWTH_RATE = 0.08; // must match frontend
 
-// Crash point formula — 4% house edge
 function generateCrashPoint(): number {
   const r = Math.random();
   if (r < 0.04) return 1.0;
   return Math.max(1.01, parseFloat((0.96 / (1 - r)).toFixed(2)));
 }
 
-// Same growth rate as the frontend (exp(0.08 * seconds))
-const GROWTH_RATE = 0.08;
-
-function multiplierAtTime(elapsedMs: number): number {
-  return parseFloat(Math.exp(GROWTH_RATE * (elapsedMs / 1000)).toFixed(2));
-}
-
-const ROUND_KEY = (roundId: string) => `crash:round:${roundId}`;
-const HISTORY_KEY = 'crash:history';
-
-interface CrashRound {
-  userId: string;
-  amount: number;
-  crashPoint: number;
-  startTime: number; // ms since epoch
-  cashedOut: boolean;
-  cashoutMultiplier?: number;
+interface RoundPayload {
+  uid: string;   // userId
+  amt: number;   // stake
+  cp: number;    // crash point
+  st: number;    // startTime (ms epoch)
+  jti: string;   // unique round id for double-cashout guard
 }
 
 // POST /api/crash/bet
-// Debit wallet and open a round for this user
+// Debit wallet, return a signed token containing the crash point & start time.
+// No Redis storage — the token IS the round state.
 router.post('/bet', authenticate, async (req: Request, res: Response) => {
   const userId = req.user!.id;
   const { amount } = req.body;
 
-  if (!amount || typeof amount !== 'number' || amount <= 0) {
-    return sendError(res, 'Invalid bet amount', 400);
+  if (typeof amount !== 'number' || amount < 1 || amount > 100_000) {
+    return sendError(res, 'Bet amount must be between 1 and 100,000', 400);
   }
 
-  if (amount < 1) return sendError(res, 'Minimum bet is 1', 400);
-  if (amount > 100000) return sendError(res, 'Maximum bet is 100,000', 400);
-
   try {
-    const result = await WalletService.debit(
-      userId,
-      amount,
-      'bet_stake',
-      `Crash game bet`,
-      { game: 'crash', amount }
+    const debitResult = await WalletService.debit(
+      userId, amount, 'bet_stake',
+      'Crash game stake',
+      { game: 'crash' }
     );
 
-    const roundId = uuidv4();
-    const round: CrashRound = {
-      userId,
-      amount,
-      crashPoint: generateCrashPoint(),
-      startTime: Date.now(),
-      cashedOut: false,
+    const payload: RoundPayload = {
+      uid: userId,
+      amt: amount,
+      cp: generateCrashPoint(),
+      st: Date.now(),
+      jti: uuidv4(),
     };
 
-    // Store round in Redis — TTL 10 minutes
-    await redis.set(ROUND_KEY(roundId), JSON.stringify(round), 'EX', 600);
+    const token = jwt.sign(payload, env.JWT_SECRET, { expiresIn: '10m' });
+
+    // Best-effort history write (failure doesn't break the game)
+    redis.lpush('crash:history', payload.cp.toFixed(2)).catch(() => {});
+    redis.ltrim('crash:history', 0, 49).catch(() => {});
 
     return sendSuccess(res, {
-      round_id: roundId,
-      new_balance: result.new_balance,
+      round_token: token,
+      crash_point: payload.cp,
+      start_time: payload.st,
+      new_balance: debitResult.new_balance,
     });
   } catch (err: any) {
     return sendError(res, err.message ?? 'Failed to place bet', 400);
@@ -77,101 +68,67 @@ router.post('/bet', authenticate, async (req: Request, res: Response) => {
 });
 
 // POST /api/crash/cashout
-// Validate timing server-side, credit wallet with winnings
+// Verify the signed token, recalculate multiplier from elapsed time, credit wallet.
 router.post('/cashout', authenticate, async (req: Request, res: Response) => {
   const userId = req.user!.id;
-  const { round_id } = req.body;
+  const { round_token } = req.body;
 
-  if (!round_id) return sendError(res, 'round_id required', 400);
+  if (!round_token) return sendError(res, 'round_token required', 400);
 
-  const raw = await redis.get(ROUND_KEY(round_id));
-  if (!raw) return sendError(res, 'Round not found or expired', 404);
-
-  let round: CrashRound;
+  let round: RoundPayload;
   try {
-    round = JSON.parse(raw);
+    round = jwt.verify(round_token, env.JWT_SECRET) as RoundPayload;
   } catch {
-    return sendError(res, 'Invalid round data', 500);
+    return sendError(res, 'Invalid or expired round token', 400);
   }
 
-  if (round.userId !== userId) return sendError(res, 'Round does not belong to you', 403);
-  if (round.cashedOut) return sendError(res, 'Already cashed out', 409);
+  if (round.uid !== userId) return sendError(res, 'Token does not belong to you', 403);
 
-  const elapsed = Date.now() - round.startTime;
-  const currentMultiplier = multiplierAtTime(elapsed);
+  // Double-cashout guard — best-effort; proceed if Redis is unavailable
+  const usedKey = `crash:used:${round.jti}`;
+  try {
+    const alreadyUsed = await redis.get(usedKey);
+    if (alreadyUsed) return sendError(res, 'Already cashed out', 409);
+  } catch { /* Redis down — skip guard */ }
 
-  // Reject if the round already crashed
-  if (currentMultiplier >= round.crashPoint) {
-    // Record loss in history, clean up round
-    await redis.lpush(HISTORY_KEY, round.crashPoint.toFixed(2));
-    await redis.ltrim(HISTORY_KEY, 0, 49);
-    await redis.del(ROUND_KEY(round_id));
-    return sendError(res, `Crashed at ${round.crashPoint.toFixed(2)}x before cashout`, 422);
+  const elapsedSec = (Date.now() - round.st) / 1000;
+  const multiplier = parseFloat(Math.exp(GROWTH_RATE * elapsedSec).toFixed(2));
+
+  if (multiplier >= round.cp) {
+    return sendError(res, `Crashed at ${round.cp.toFixed(2)}x before cashout`, 422);
   }
 
-  const winAmount = parseFloat((round.amount * currentMultiplier).toFixed(2));
+  const winAmount = parseFloat((round.amt * multiplier).toFixed(2));
 
   try {
-    const result = await WalletService.credit(
-      userId,
-      winAmount,
-      'bet_win',
-      undefined,
-      undefined,
-      `Crash game win at ${currentMultiplier.toFixed(2)}x`,
-      { game: 'crash', round_id, multiplier: currentMultiplier, stake: round.amount }
+    const creditResult = await WalletService.credit(
+      userId, winAmount, 'bet_win',
+      undefined, undefined,
+      `Crash game win at ${multiplier.toFixed(2)}x`,
+      { game: 'crash', multiplier, stake: round.amt }
     );
 
-    // Mark cashed out and update Redis
-    round.cashedOut = true;
-    round.cashoutMultiplier = currentMultiplier;
-    await redis.set(ROUND_KEY(round_id), JSON.stringify(round), 'EX', 60);
+    // Mark token as used (best-effort)
+    redis.set(usedKey, '1', 'EX', 600).catch(() => {});
 
     return sendSuccess(res, {
-      cashout_multiplier: currentMultiplier,
+      cashout_multiplier: multiplier,
       win_amount: winAmount,
-      new_balance: result.new_balance,
+      new_balance: creditResult.new_balance,
     });
   } catch (err: any) {
     return sendError(res, err.message ?? 'Cashout failed', 500);
   }
 });
 
-// POST /api/crash/round-end
-// Called by frontend when the round ends (crash point reached)
-// Records crash point in history for display purposes
-router.post('/round-end', authenticate, async (req: Request, res: Response) => {
-  const userId = req.user!.id;
-  const { round_id } = req.body;
-
-  if (!round_id) return sendError(res, 'round_id required', 400);
-
-  const raw = await redis.get(ROUND_KEY(round_id));
-  if (!raw) return sendSuccess(res, { recorded: false });
-
-  let round: CrashRound;
-  try {
-    round = JSON.parse(raw);
-  } catch {
-    return sendError(res, 'Invalid round data', 500);
-  }
-
-  if (round.userId !== userId) return sendError(res, 'Forbidden', 403);
-
-  // Record crash point in history
-  await redis.lpush(HISTORY_KEY, round.crashPoint.toFixed(2));
-  await redis.ltrim(HISTORY_KEY, 0, 49);
-  await redis.del(ROUND_KEY(round_id));
-
-  return sendSuccess(res, { recorded: true, crash_point: round.crashPoint });
-});
-
 // GET /api/crash/history
-// Returns the last 20 crash points
 router.get('/history', async (_req: Request, res: Response) => {
-  const items = await redis.lrange(HISTORY_KEY, 0, 19);
-  const history = items.map(v => parseFloat(v));
-  return sendSuccess(res, { history });
+  try {
+    const items = await redis.lrange('crash:history', 0, 19);
+    return sendSuccess(res, { history: items.map(v => parseFloat(v)) });
+  } catch {
+    return sendSuccess(res, { history: [] });
+  }
 });
 
 export default router;
