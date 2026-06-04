@@ -9,6 +9,7 @@ import { sendSuccess, sendError } from '../../utils/response';
 
 const router = Router();
 const GROWTH_RATE = 0.08; // must match frontend
+const COUNTDOWN_MS = 5000; // must match frontend countdown
 
 function generateCrashPoint(): number {
   const r = Math.random();
@@ -42,11 +43,13 @@ router.post('/bet', authenticate, async (req: Request, res: Response) => {
       { game: 'crash' }
     );
 
+    // st = scheduled game start time (after the 5-second countdown)
+    // so elapsed is ~0 when the game animation actually begins
     const payload: RoundPayload = {
       uid: userId,
       amt: amount,
       cp: generateCrashPoint(),
-      st: Date.now(),
+      st: Date.now() + COUNTDOWN_MS,
       jti: uuidv4(),
     };
 
@@ -90,6 +93,10 @@ router.post('/cashout', authenticate, async (req: Request, res: Response) => {
     const alreadyUsed = await redis.get(usedKey);
     if (alreadyUsed) return sendError(res, 'Already cashed out', 409);
   } catch { /* Redis down — skip guard */ }
+
+  if (Date.now() < round.st) {
+    return sendError(res, 'Round has not started yet', 425);
+  }
 
   const elapsedSec = (Date.now() - round.st) / 1000;
   const multiplier = parseFloat(Math.exp(GROWTH_RATE * elapsedSec).toFixed(2));
