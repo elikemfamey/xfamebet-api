@@ -443,12 +443,18 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
 
     await FraudService.emitEvent(user.id, 'registration', { ip: req.ip, device: req.headers['user-agent'], phone });
 
-    await sendOtpSms(phone, otp);
-    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(phone), 60, '1');
+    let smsSent = true;
+    try {
+      await sendOtpSms(phone, otp);
+      await redis.setex(REDIS_KEYS.OTP_COOLDOWN(phone), 60, '1');
+    } catch (smsErr) {
+      logger.error('register-phone sms failed', { smsErr, phone });
+      smsSent = false;
+    }
 
     return sendSuccess(res, {
       user_id: user.id,
-      message: 'OTP sent to your phone number.',
+      message: smsSent ? 'OTP sent to your phone number.' : 'Account created. OTP delivery failed — please use Resend OTP.',
       otp: env.NODE_ENV !== 'production' ? otp : undefined,
     }, 201);
   } catch (err) {
