@@ -30,6 +30,9 @@ validateEnv();
 const app = express();
 const server = http.createServer(app);
 
+// Trust Render's reverse proxy so express-rate-limit can read X-Forwarded-For correctly
+app.set('trust proxy', 1);
+
 // Security
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({
