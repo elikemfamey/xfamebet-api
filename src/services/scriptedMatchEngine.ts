@@ -348,7 +348,7 @@ function attachTick(matchId: string): NodeJS.Timeout {
       matchStates.delete(matchId);
       logger.info(`Scripted match ${matchId} ended: ${state.scoreA}-${state.scoreB} (${result})`);
     }
-  }, 60_000); // real-time: 1 tick = 1 game minute
+  }, 60_000); // 1 real minute per game minute
 
   return interval;
 }
@@ -412,6 +412,23 @@ export class ScriptedMatchEngine {
       state.scoreA = homeScore;
       state.scoreB = awayScore;
     }
+  }
+
+  static broadcastState(matchId: string) {
+    const state = matchStates.get(matchId);
+    if (!state) return;
+    try {
+      const io = getIO();
+      io.to(`match:${matchId}`).emit('match:state', {
+        matchId,
+        minute: state.minute,
+        scoreA: state.scoreA,
+        scoreB: state.scoreB,
+        possession: state.possession,
+        shots: state.shots,
+        fouls: state.fouls,
+      });
+    } catch {}
   }
 
   static async injectEvent(

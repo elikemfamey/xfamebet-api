@@ -346,12 +346,18 @@ router.post('/admin/:id/edit-score', authenticate, requireAdmin, validateBody(z.
   const { id } = req.params;
   const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
 
-  if ((match as any)?.is_scripted) ScriptedMatchEngine.overrideScore(id, req.body.home_score, req.body.away_score);
+  const isScripted = (match as any)?.is_scripted;
+  if (isScripted) ScriptedMatchEngine.overrideScore(id, req.body.home_score, req.body.away_score);
   else SimulationEngine.overrideScore(id, req.body.home_score, req.body.away_score);
 
   await supabase.from('simulated_matches')
     .update({ team_a_score: req.body.home_score, team_b_score: req.body.away_score })
     .eq('id', id);
+
+  // Immediately push updated score to all connected clients
+  if (isScripted) ScriptedMatchEngine.broadcastState(id);
+  else SimulationEngine.broadcastState(id);
+
   return sendSuccess(res, { message: 'Score updated' });
 });
 
@@ -365,9 +371,15 @@ router.post('/admin/:id/inject-event', authenticate, requireAdmin, validateBody(
 })), async (req, res) => {
   const { id } = req.params;
   const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
-  const eng = engine((match as any)?.is_scripted ?? false);
+  const isScriptedMatch = (match as any)?.is_scripted ?? false;
+  const eng = engine(isScriptedMatch);
 
   await eng.injectEvent(id, req.body.event_type, req.body.team, req.body.player_name, req.body.commentary);
+
+  // Push updated score to clients immediately after goal injection
+  if (isScriptedMatch) ScriptedMatchEngine.broadcastState(id);
+  else SimulationEngine.broadcastState(id);
+
   return sendSuccess(res, { message: 'Event injected' });
 });
 

@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabase';
-import { getIO } from '../socket';
+import { getIO, broadcastBetWon, broadcastWalletUpdate } from '../socket';
+import { WalletService } from './walletService';
 import { logger } from '../utils/logger';
 
 interface MatchState {
@@ -166,7 +167,7 @@ export class SimulationEngine {
         matchStates.delete(matchId);
         logger.info(`Match ${matchId} completed: ${currentState.scoreA}-${currentState.scoreB}`);
       }
-    }, 2000); // 2 seconds per minute for demo (real: 60s)
+    }, 60_000); // 1 real minute per game minute
 
     activeMatches.set(matchId, interval);
   }
@@ -216,7 +217,7 @@ export class SimulationEngine {
         await SimulationEngine.settleBets(matchId, result, currentState.scoreA, currentState.scoreB);
         matchStates.delete(matchId);
       }
-    }, 2000);
+    }, 1000); // 1 second per game minute
     activeMatches.set(matchId, interval);
   }
 
@@ -226,6 +227,23 @@ export class SimulationEngine {
       state.scoreA = homeScore;
       state.scoreB = awayScore;
     }
+  }
+
+  static broadcastState(matchId: string) {
+    const state = matchStates.get(matchId);
+    if (!state) return;
+    try {
+      const io = getIO();
+      io.to(`match:${matchId}`).emit('match:state', {
+        matchId,
+        minute: state.minute,
+        scoreA: state.scoreA,
+        scoreB: state.scoreB,
+        possession: state.possession,
+        shots: state.shots,
+        fouls: state.fouls,
+      });
+    } catch {}
   }
 
   static async injectEvent(
@@ -493,6 +511,7 @@ export class SimulationEngine {
 
   static async settleBets(matchId: string, result: string, scoreA: number, scoreB: number) {
     const eventId = `sim:${matchId}`;
+    const finalScore = `${scoreA}-${scoreB}`;
 
     const { data: pendingBets } = await supabase.from('bets')
       .select('id, user_id, stake, potential_payout, bet_type')
@@ -506,6 +525,7 @@ export class SimulationEngine {
 
       if (!selections || selections.length === 0) continue;
 
+      // Settle each selection for this match
       for (const sel of selections) {
         let won = false;
         if (sel.market_type === 'match_winner') {
@@ -520,8 +540,34 @@ export class SimulationEngine {
           won = (sel.selection === 'yes' && scoreA > 0 && scoreB > 0) ||
                 (sel.selection === 'no' && !(scoreA > 0 && scoreB > 0));
         }
-
         await supabase.from('bet_selections').update({ status: won ? 'won' : 'lost' }).eq('id', sel.id);
+      }
+
+      // Check if ALL legs of this bet are now settled (handles accumulators across multiple matches)
+      const { data: allSels } = await supabase.from('bet_selections')
+        .select('status').eq('bet_id', bet.id);
+
+      if (!allSels || allSels.some(s => s.status === 'pending')) continue;
+
+      const betWon = allSels.every(s => s.status === 'won');
+      const betStatus = betWon ? 'won' : 'lost';
+      const payout = betWon ? bet.potential_payout : 0;
+
+      await supabase.from('bets').update({
+        status: betStatus,
+        settled_at: new Date().toISOString(),
+        payout,
+        metadata: { finalScores: { [eventId]: finalScore } },
+      }).eq('id', bet.id);
+
+      if (betWon) {
+        try {
+          const { new_balance } = await WalletService.credit(bet.user_id, payout, 'bet_win', undefined, undefined, `Bet won - ${bet.id}`);
+          broadcastWalletUpdate(bet.user_id, new_balance);
+          broadcastBetWon(bet.user_id, { betId: bet.id, amount: payout, currency: 'GHS' });
+        } catch (e) {
+          logger.error('Failed to credit win payout', { betId: bet.id, error: e });
+        }
       }
     }
   }
