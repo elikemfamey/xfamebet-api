@@ -35,8 +35,21 @@ app.set('trust proxy', 1);
 
 // Security
 app.use(helmet({ contentSecurityPolicy: false }));
+const allowedOrigins = [
+  ...env.FRONTEND_URL.split(',').map(u => u.trim()),
+  'http://localhost:3000',
+  'http://localhost:3001',
+];
+
 app.use(cors({
-  origin: [env.FRONTEND_URL, 'http://localhost:3000', 'http://localhost:3001'],
+  origin: (origin, callback) => {
+    const isVercelPreview = !!origin && /^https:\/\/xfamebet.*\.vercel\.app$/.test(origin);
+    if (!origin || allowedOrigins.includes(origin) || isVercelPreview) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS: origin ${origin} not allowed`));
+    }
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
