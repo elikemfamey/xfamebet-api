@@ -314,7 +314,7 @@ router.post('/reset-password', authLimiter, validateBody(resetSchema), async (re
     if (cooldown) return sendError(res, 'Please wait 60 seconds before requesting another reset code', 429);
   }
 
-  const query = supabase.from('users').select('id, phone');
+  const query = supabase.from('users').select('id, phone, country');
   const { data: user } = email
     ? await query.eq('email', email).single()
     : await query.eq('phone', phone).single();
@@ -324,7 +324,7 @@ router.post('/reset-password', authLimiter, validateBody(resetSchema), async (re
     await redis.setex(`pwd_reset:${user.id}`, 600, otp);
 
     if (user.phone) {
-      await sendOtpSms(user.phone, otp);
+      await sendOtpSms(user.phone, otp, user.country ?? 'GH');
       await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
     } else {
       logger.info('pwd_reset_otp', { otp, user_id: user.id });
@@ -375,7 +375,7 @@ router.get('/me', authenticate, async (req, res) => {
 
 // POST /auth/send-otp
 router.post('/send-otp', authenticate, async (req, res) => {
-  const { data: user } = await supabase.from('users').select('phone').eq('id', req.user!.id).single();
+  const { data: user } = await supabase.from('users').select('phone, country').eq('id', req.user!.id).single();
   if (!user?.phone) return sendError(res, 'No phone number on this account', 400);
 
   const cooldown = await redis.get(REDIS_KEYS.OTP_COOLDOWN(user.phone));
@@ -383,7 +383,7 @@ router.post('/send-otp', authenticate, async (req, res) => {
 
   const otp = generateOtp();
   await redis.setex(REDIS_KEYS.OTP(req.user!.id), 600, otp);
-  await sendOtpSms(user.phone, otp);
+  await sendOtpSms(user.phone, otp, user.country ?? 'GH');
   await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
 
   return sendSuccess(res, { message: 'OTP sent' });
@@ -447,7 +447,7 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
 
     let smsSent = true;
     try {
-      await sendOtpSms(phone, otp);
+      await sendOtpSms(phone, otp, country);
       await redis.setex(REDIS_KEYS.OTP_COOLDOWN(phone), 60, '1');
     } catch (smsErr) {
       logger.error('register-phone sms failed', { smsErr, phone });
