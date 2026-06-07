@@ -1,5 +1,13 @@
-import { Response } from 'express';
+import { Request, Response, NextFunction, RequestHandler } from 'express';
 import { ApiResponse } from '../types';
+
+type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;
+
+export function asyncHandler(fn: AsyncHandler): RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
 
 export function sendSuccess<T>(res: Response, data: T, statusCode = 200, message?: string) {
   const response: ApiResponse<T> = { success: true, data, message };
