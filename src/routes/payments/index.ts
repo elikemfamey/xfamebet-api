@@ -198,7 +198,7 @@ router.post('/usdt-trc20/deposit', authenticate, paymentLimiter, validateBody(us
 
 // GET /payments/crypto-address
 router.get('/crypto-address', authenticate, async (_req, res) => {
-  return sendSuccess(res, { address: env.CRYPTO_WALLET_ADDRESS, network: 'TRC20', binance_uid: env.BINANCE_UID || null });
+  return sendSuccess(res, { address: env.CRYPTO_WALLET_ADDRESS, network: 'TRC20', binance_uid: env.BINANCE_UID || null, binance_name: env.BINANCE_NAME || null });
 });
 
 // GET /payments/payment-info — company collection details for deposit page
@@ -218,6 +218,7 @@ router.get('/payment-info', authenticate, async (_req, res) => {
     crypto: {
       usdt_trc20: env.CRYPTO_WALLET_ADDRESS,
       binance_uid: env.BINANCE_UID || null,
+      binance_name: env.BINANCE_NAME || null,
     },
     minimums: { crypto_usd: 30, momo_ghs: 300, bank_ngn: 5000 },
     quick_picks: {

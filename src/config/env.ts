@@ -30,6 +30,7 @@ export const env = {
 
   CRYPTO_WALLET_ADDRESS: process.env.CRYPTO_WALLET_ADDRESS || '',
   BINANCE_UID: process.env.BINANCE_UID || '',
+  BINANCE_NAME: process.env.BINANCE_NAME || '',
 
   // Company collection details for manual deposits
   COMPANY_MOMO_NETWORK: process.env.COMPANY_MOMO_NETWORK || 'TELECEL / VODAFONE GHANA',
