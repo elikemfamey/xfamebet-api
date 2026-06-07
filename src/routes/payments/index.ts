@@ -11,6 +11,7 @@ import { sendSuccess, sendError, sendPaginated, asyncHandler } from '../../utils
 import { paymentLimiter } from '../../middleware/rateLimiter';
 import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
+import { AffiliateService } from '../../services/affiliateService';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -437,6 +438,7 @@ router.post('/admin/deposits/:id/approve', authenticate, requireAdmin, validateB
 
   await WalletService.credit(deposit.user_id, deposit.amount, 'deposit', deposit.payment_provider, undefined, `${deposit.payment_provider} deposit approved`);
   await NotificationService.send(deposit.user_id, 'deposit_approved', 'Deposit Approved', `Your deposit of ${deposit.currency} ${deposit.amount} has been approved and credited.`);
+  AffiliateService.creditCpaCommission(deposit.user_id, deposit.amount).catch(() => {});
 
   await AdminLogService.log(req.user!.id, 'approve_deposit', 'deposit_request', id, { amount: deposit.amount, provider: deposit.payment_provider });
   await supabase.from('payment_audit_logs').insert({ entity_type: 'deposit_request', entity_id: id, action: 'approve', admin_id: req.user!.id, previous_status: 'pending', new_status: 'approved', amount: deposit.amount, notes });

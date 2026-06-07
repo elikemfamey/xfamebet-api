@@ -5,6 +5,7 @@ import { supabase } from '../../config/supabase';
 import { WalletService } from '../../services/walletService';
 import { FraudService } from '../../services/fraudService';
 import { NotificationService } from '../../services/notificationService';
+import { AffiliateService } from '../../services/affiliateService';
 import { authenticate, requireAdmin } from '../../middleware/auth';
 import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
@@ -259,6 +260,12 @@ router.post('/admin/settle/:id', authenticate, requireAdmin, async (req, res) =>
     await WalletService.credit(bet.user_id, bet.stake, 'refund', undefined, undefined, `Bet voided - stake refunded`);
   } else {
     await NotificationService.send(bet.user_id, 'bet_lost', 'Bet Lost', `Your bet has been settled.`);
+  }
+
+  // Credit affiliate revenue-share commission based on net house revenue
+  if (newStatus === 'won' || newStatus === 'lost') {
+    const payout = newStatus === 'won' ? (bet.potential_payout ?? 0) : 0;
+    AffiliateService.creditBetCommission(bet.user_id, bet.stake, payout).catch(() => {});
   }
 
   return sendSuccess(res, { message: `Bet settled as ${newStatus}` });
