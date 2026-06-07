@@ -331,7 +331,10 @@ router.post('/reset-password', authLimiter, validateBody(resetSchema), async (re
     }
   }
 
-  return sendSuccess(res, { message: 'If that account exists, a reset code has been sent.' });
+  return sendSuccess(res, {
+    message: 'If that account exists, a reset code has been sent.',
+    user_id: user?.id ?? null,
+  });
 });
 
 // POST /auth/reset-password/confirm

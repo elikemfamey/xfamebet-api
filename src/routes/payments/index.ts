@@ -143,7 +143,7 @@ router.post('/paystack/webhook', asyncHandler(async (req, res) => {
 router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(manualMomoSchema), asyncHandler(async (req, res) => {
   const { amount, provider, phone_number, sender_name, transaction_id, screenshot_url } = req.body;
 
-  await supabase.from('deposit_requests').insert({
+  const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
     amount,
     currency: 'GHS',
@@ -154,6 +154,7 @@ router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(m
     account_name: sender_name,
     status: 'pending',
   });
+  if (error) return sendError(res, 'Failed to record deposit request', 500);
 
   return sendSuccess(res, { message: 'Deposit request submitted. Awaiting admin approval.' }, 201);
 }));
@@ -162,7 +163,7 @@ router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(m
 router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBankSchema), asyncHandler(async (req, res) => {
   const { amount, bank_name, account_name, reference, screenshot_url } = req.body;
 
-  await supabase.from('deposit_requests').insert({
+  const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
     amount,
     currency: 'NGN',
@@ -173,6 +174,7 @@ router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBan
     account_name,
     status: 'pending',
   });
+  if (error) return sendError(res, 'Failed to record deposit request', 500);
 
   return sendSuccess(res, { message: 'Bank transfer request submitted. Awaiting admin approval.' }, 201);
 }));
@@ -181,7 +183,7 @@ router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBan
 router.post('/usdt-trc20/deposit', authenticate, paymentLimiter, validateBody(usdtSchema), asyncHandler(async (req, res) => {
   const { amount_usd, tx_hash } = req.body;
 
-  await supabase.from('deposit_requests').insert({
+  const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
     amount: amount_usd,
     currency: 'USDT',
@@ -189,6 +191,7 @@ router.post('/usdt-trc20/deposit', authenticate, paymentLimiter, validateBody(us
     tx_hash,
     status: 'pending',
   });
+  if (error) return sendError(res, 'Failed to record deposit request', 500);
 
   return sendSuccess(res, {
     message: 'Crypto deposit submitted. Awaiting blockchain verification.',
