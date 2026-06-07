@@ -29,7 +29,7 @@ export class AffiliateService {
 
     if (!referral) return;
 
-    const aff = referral.affiliates as {
+    const aff = referral.affiliates as unknown as {
       commission_type: string;
       commission_rate: number;
       approval_status: string;
@@ -83,7 +83,7 @@ export class AffiliateService {
 
     if (!referral) return;
 
-    const aff = referral.affiliates as {
+    const aff = referral.affiliates as unknown as {
       commission_type: string;
       cpa_amount: number;
       approval_status: string;
