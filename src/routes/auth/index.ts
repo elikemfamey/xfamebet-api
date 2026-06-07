@@ -203,14 +203,39 @@ router.post('/verify-otp', authLimiter, validateBody(otpSchema), async (req, res
   return sendSuccess(res, { message: 'OTP verified successfully' });
 });
 
+// Normalise a raw phone string and try common country code prefixes
+async function findUserByPhone(rawPhone: string) {
+  const PREFIXES = ['+233', '+234', '+254', '+27', '+256'];
+
+  // 1. Exact match
+  const { data: exact } = await supabase.from('users').select('*').eq('phone', rawPhone).single();
+  if (exact) return exact;
+
+  // 2. Add leading + if missing
+  if (!rawPhone.startsWith('+')) {
+    const { data: withPlus } = await supabase.from('users').select('*').eq('phone', `+${rawPhone}`).single();
+    if (withPlus) return withPlus;
+  }
+
+  // 3. Strip leading zeroes and try all supported country prefixes
+  const digits = rawPhone.replace(/\D/g, '').replace(/^0+/, '');
+  for (const prefix of PREFIXES) {
+    const candidate = `${prefix}${digits}`;
+    if (candidate === rawPhone) continue;
+    const { data: match } = await supabase.from('users').select('*').eq('phone', candidate).single();
+    if (match) return match;
+  }
+
+  return null;
+}
+
 // POST /auth/login
 router.post('/login', authLimiter, validateBody(loginSchema), async (req, res) => {
   const { email, phone, password } = req.body;
 
-  const query = supabase.from('users').select('*');
-  const { data: user } = email
-    ? await query.eq('email', email).single()
-    : await query.eq('phone', phone).single();
+  const user = email
+    ? (await supabase.from('users').select('*').eq('email', email).single()).data
+    : await findUserByPhone(phone);
 
   if (!user || !user.password_hash) {
     return sendError(res, 'Invalid credentials', 401);

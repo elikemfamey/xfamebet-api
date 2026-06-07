@@ -30,7 +30,7 @@ export class WalletService {
 
     try {
       const { data: wallet, error: walletErr } = await supabase
-        .from('wallets').select('id, balance').eq('user_id', userId).single();
+        .from('wallets').select('id, balance, currency').eq('user_id', userId).single();
       if (walletErr || !wallet) throw new Error('Wallet not found');
 
       const { error: txErr } = await supabase.from('transactions').insert({
@@ -38,7 +38,7 @@ export class WalletService {
         wallet_id: wallet.id,
         type,
         amount,
-        currency: 'GHS',
+        currency: wallet.currency,
         status: 'completed',
         payment_provider: provider,
         reference,
@@ -61,7 +61,7 @@ export class WalletService {
 
   static async creditBonus(userId: string, amount: number, description?: string) {
     const { data: wallet, error } = await supabase
-      .from('wallets').select('id, bonus_balance').eq('user_id', userId).single();
+      .from('wallets').select('id, bonus_balance, currency').eq('user_id', userId).single();
     if (error || !wallet) throw new Error('Wallet not found');
 
     await supabase.from('transactions').insert({
@@ -69,7 +69,7 @@ export class WalletService {
       wallet_id: wallet.id,
       type: 'bonus',
       amount,
-      currency: 'GHS',
+      currency: wallet.currency,
       status: 'completed',
       description,
     });
@@ -94,7 +94,7 @@ export class WalletService {
 
     try {
       const { data: wallet, error: walletErr } = await supabase
-        .from('wallets').select('id, balance, frozen').eq('user_id', userId).single();
+        .from('wallets').select('id, balance, frozen, currency').eq('user_id', userId).single();
       if (walletErr || !wallet) throw new Error('Wallet not found');
       if (wallet.frozen) throw new Error('Wallet is frozen');
       if (wallet.balance < amount) throw new Error('Insufficient balance');
@@ -104,7 +104,7 @@ export class WalletService {
         wallet_id: wallet.id,
         type,
         amount: -amount,
-        currency: 'GHS',
+        currency: wallet.currency,
         status: 'completed',
         description,
         metadata,
