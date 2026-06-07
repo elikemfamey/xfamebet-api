@@ -29,6 +29,7 @@ export const env = {
   SMTP_FROM: process.env.SMTP_FROM || 'noreply@xfamebet.com',
 
   CRYPTO_WALLET_ADDRESS: process.env.CRYPTO_WALLET_ADDRESS || '',
+  BINANCE_UID: process.env.BINANCE_UID || '',
 
   // Company collection details for manual deposits
   COMPANY_MOMO_NETWORK: process.env.COMPANY_MOMO_NETWORK || 'TELECEL / VODAFONE GHANA',
@@ -37,6 +38,7 @@ export const env = {
   COMPANY_BANK_NAME: process.env.COMPANY_BANK_NAME || '',
   COMPANY_BANK_ACCOUNT_NAME: process.env.COMPANY_BANK_ACCOUNT_NAME || '',
   COMPANY_BANK_ACCOUNT_NUMBER: process.env.COMPANY_BANK_ACCOUNT_NUMBER || '',
+  COMPANY_BANK_CURRENCY: process.env.COMPANY_BANK_CURRENCY || 'NGN',
 
   ODDS_API_KEY: process.env.ODDS_API_KEY || '',
   API_FOOTBALL_KEY: process.env.API_FOOTBALL_KEY || '',
