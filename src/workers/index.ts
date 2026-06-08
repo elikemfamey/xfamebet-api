@@ -112,8 +112,8 @@ export function startWorkers() {
     }
   });
 
-  // Fetch Odds API scores for all active sports every minute (covers all sports)
-  cron.schedule('* * * * *', async () => {
+  // Fetch Odds API scores for all active sports every 2 minutes (covers all sports)
+  cron.schedule('*/2 * * * *', async () => {
     try {
       const sports = await getActiveSports();
       await fetchAllSportsScores(sports.map(s => s.key));
