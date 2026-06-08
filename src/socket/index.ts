@@ -10,7 +10,7 @@ let io: Server;
 export function initSocketIO(server: HttpServer) {
   io = new Server(server, {
     cors: {
-      origin: [env.FRONTEND_URL, 'http://localhost:3000'],
+      origin: [...env.FRONTEND_URL.split(',').map(u => u.trim()), 'http://localhost:3000'],
       methods: ['GET', 'POST'],
       credentials: true,
     },
