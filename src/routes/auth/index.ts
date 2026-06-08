@@ -203,27 +203,16 @@ router.post('/verify-otp', authLimiter, validateBody(otpSchema), async (req, res
   return sendSuccess(res, { message: 'OTP verified successfully' });
 });
 
-// Normalise a raw phone string and try common country code prefixes
+// Normalise a raw phone string and look up user
 async function findUserByPhone(rawPhone: string) {
-  const PREFIXES = ['+233', '+234', '+254', '+27', '+256'];
-
   // 1. Exact match
   const { data: exact } = await supabase.from('users').select('*').eq('phone', rawPhone).single();
   if (exact) return exact;
 
-  // 2. Add leading + if missing
+  // 2. Add leading + if missing and retry
   if (!rawPhone.startsWith('+')) {
     const { data: withPlus } = await supabase.from('users').select('*').eq('phone', `+${rawPhone}`).single();
     if (withPlus) return withPlus;
-  }
-
-  // 3. Strip leading zeroes and try all supported country prefixes
-  const digits = rawPhone.replace(/\D/g, '').replace(/^0+/, '');
-  for (const prefix of PREFIXES) {
-    const candidate = `${prefix}${digits}`;
-    if (candidate === rawPhone) continue;
-    const { data: match } = await supabase.from('users').select('*').eq('phone', candidate).single();
-    if (match) return match;
   }
 
   return null;
