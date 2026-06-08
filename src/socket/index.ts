@@ -46,7 +46,7 @@ export function initSocketIO(server: HttpServer) {
       logger.debug(`User ${userId} connected via Socket.IO`);
     }
 
-    // Subscribe to live match
+    // Subscribe to live match (MatchCard path — raw id, no prefix)
     socket.on('match:join', (matchId: string) => {
       socket.join(`match:${matchId}`);
       socket.emit('match:joined', { matchId });
@@ -54,6 +54,22 @@ export function initSocketIO(server: HttpServer) {
 
     socket.on('match:leave', (matchId: string) => {
       socket.leave(`match:${matchId}`);
+    });
+
+    // Subscribe to live match (MatchDetailsModal path — full prefixed id, e.g. 'af:12345')
+    socket.on('subscribe_match', ({ matchId }: { matchId: string }) => {
+      const cleanId = matchId.startsWith('af:') ? matchId.slice(3)
+        : matchId.startsWith('sim:') ? matchId.slice(4)
+        : matchId;
+      socket.join(`match:${cleanId}`);
+      socket.emit('match:joined', { matchId: cleanId });
+    });
+
+    socket.on('unsubscribe_match', ({ matchId }: { matchId: string }) => {
+      const cleanId = matchId.startsWith('af:') ? matchId.slice(3)
+        : matchId.startsWith('sim:') ? matchId.slice(4)
+        : matchId;
+      socket.leave(`match:${cleanId}`);
     });
 
     // Subscribe to odds updates for an event
@@ -115,4 +131,105 @@ export function broadcastBetWon(userId: string, payload: {
 export function broadcastLiveScoresUpdate(count: number) {
   if (!io) return;
   io.emit('scores:update', { count, timestamp: new Date().toISOString() });
+}
+
+// ─── API-Football fixture broadcast ───────────────────────────────────────────
+
+export interface FixtureStats {
+  possession: { home: number; away: number };
+  shots: { home: number; away: number };
+  shotsOnTarget: { home: number; away: number };
+  corners: { home: number; away: number };
+  fouls: { home: number; away: number };
+  yellowCards: { home: number; away: number };
+  redCards: { home: number; away: number };
+  offsides: { home: number; away: number };
+  passAccuracy: { home: number; away: number };
+}
+
+export interface FixtureCommentaryEvent {
+  id: string;
+  minute: number;
+  type: string;
+  team: 'home' | 'away';
+  player: string | null;
+  description: string;
+  newScore?: string;
+}
+
+function toMatchStatus(statusShort: string): string {
+  switch (statusShort) {
+    case 'HT': case 'BT': return 'halftime';
+    case 'FT': case 'AET': case 'PEN': return 'fulltime';
+    case 'ET': case 'P': return 'injury_time';
+    case '2H': return 'second_half';
+    default: return 'live';
+  }
+}
+
+export function broadcastFixtureUpdate(
+  fixtureId: number,
+  score: { home: number; away: number },
+  minute: number,
+  statusShort: string,
+  stats: FixtureStats | null,
+  newEvents: FixtureCommentaryEvent[],
+) {
+  if (!io) return;
+
+  const room = `match:${fixtureId}`;
+  const fullId = `af:${fixtureId}`;
+  const status = toMatchStatus(statusShort);
+
+  // MatchCard: match:state (room-based, uses numeric id as matchId)
+  io.to(room).emit('match:state', {
+    matchId: String(fixtureId),
+    scoreA: score.home,
+    scoreB: score.away,
+    minute,
+    possession: stats ? { a: stats.possession.home, b: stats.possession.away } : undefined,
+  });
+
+  // MatchDetailsModal: namespaced events (uses full prefixed id)
+  io.to(room).emit(`match:${fullId}:score`, { home: score.home, away: score.away });
+  io.to(room).emit(`match:${fullId}:timer`, { timer: `${minute}` });
+  io.to(room).emit(`match:${fullId}:status`, { status });
+
+  if (stats) {
+    io.to(room).emit(`match:${fullId}:possession`, { home: stats.possession.home, away: stats.possession.away });
+    io.to(room).emit(`match:${fullId}:stats`, {
+      possession: { h: stats.possession.home, a: stats.possession.away },
+      shots: { h: stats.shots.home, a: stats.shots.away },
+      shotsOnTarget: { h: stats.shotsOnTarget.home, a: stats.shotsOnTarget.away },
+      passAccuracy: { h: stats.passAccuracy.home, a: stats.passAccuracy.away },
+      corners: { h: stats.corners.home, a: stats.corners.away },
+      fouls: { h: stats.fouls.home, a: stats.fouls.away },
+      yellowCards: { h: stats.yellowCards.home, a: stats.yellowCards.away },
+      redCards: { h: stats.redCards.home, a: stats.redCards.away },
+      offsides: { h: stats.offsides.home, a: stats.offsides.away },
+    });
+  }
+
+  for (const evt of newEvents) {
+    // MatchDetailsModal commentary
+    io.to(room).emit(`match:${fullId}:commentary`, evt);
+    // MatchDetailsModal recent action
+    io.to(room).emit(`match:${fullId}:recent_action`, {
+      type: evt.type,
+      team: evt.team,
+      player: evt.player,
+      minute: evt.minute,
+    });
+    // MatchCard event flash
+    io.to(room).emit('match:event', {
+      simulation_id: String(fixtureId),
+      event_type: evt.type,
+      player: evt.player,
+      team: evt.team,
+      commentary: evt.description,
+      score_a: score.home,
+      score_b: score.away,
+      minute: evt.minute,
+    });
+  }
 }
