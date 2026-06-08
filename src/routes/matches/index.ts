@@ -31,10 +31,7 @@ router.get('/', async (req, res) => {
     .order('updated_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
-  if (sport) {
-    if (sport === 'baseball') query = query.ilike('sport', 'baseball%');
-    else query = query.eq('sport', sport);
-  }
+  if (sport) query = query.eq('sport', sport);
   if (live) query = query.not('starts_at', 'is', null).lte('starts_at', new Date().toISOString());
 
   const { data, count } = await query;
@@ -59,10 +56,7 @@ router.get('/live', async (req, res) => {
     .order('updated_at', { ascending: false })
     .limit(100);
 
-  if (sport) {
-    if (sport === 'baseball') query = query.ilike('sport', 'baseball%');
-    else query = query.eq('sport', sport);
-  }
+  if (sport) query = query.eq('sport', sport);
 
   const { data } = await query;
   return sendSuccess(res, data ?? []);

@@ -111,3 +111,8 @@ export function broadcastBetWon(userId: string, payload: {
   if (!io) return;
   io.to(`user:${userId}`).emit('bet:won', payload);
 }
+
+export function broadcastLiveScoresUpdate(count: number) {
+  if (!io) return;
+  io.emit('scores:update', { count, timestamp: new Date().toISOString() });
+}

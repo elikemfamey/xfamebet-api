@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { redis } from '../config/redis';
+import { broadcastLiveScoresUpdate } from '../socket';
 import { logger } from '../utils/logger';
 import { env } from '../config/env';
 import { persistFixtureLogos } from './teamLogoService';
@@ -53,6 +54,13 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
     if (scores.length > 0) {
       await redis.setex(REDIS_KEY, TTL, JSON.stringify(scores));
       logger.info(`[LiveScores] Cached ${scores.length} live matches`);
+
+      // Bust all live-feed variant caches so next request rebuilds with fresh scores
+      const feedKeys = await redis.keys('live_feed:*');
+      if (feedKeys.length > 0) await redis.del(...feedKeys);
+
+      // Notify all connected clients so they refetch the live feed immediately
+      broadcastLiveScoresUpdate(scores.length);
 
       // Persist team logos to Supabase as a background side-effect (no await)
       persistFixtureLogos(

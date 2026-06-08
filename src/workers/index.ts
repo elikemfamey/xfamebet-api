@@ -1,7 +1,9 @@
 import cron from 'node-cron';
 import { supabase } from '../config/supabase';
-import { ingestAllOdds } from '../services/oddsIngestionService';
+import { ingestAllOdds, getActiveSports } from '../services/oddsIngestionService';
 import { fetchAndCacheLiveScores } from '../services/liveScoreService';
+import { fetchAllSportsScores } from '../services/oddsApiScoreService';
+import { settlePendingBets } from '../services/betSettlementService';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { logger } from '../utils/logger';
 
@@ -101,7 +103,7 @@ export function startWorkers() {
     }
   });
 
-  // Fetch live scores from API-Football every minute
+  // Fetch live scores from API-Football every minute (football detail: minute, possession)
   cron.schedule('* * * * *', async () => {
     try {
       await fetchAndCacheLiveScores();
@@ -110,11 +112,32 @@ export function startWorkers() {
     }
   });
 
+  // Fetch Odds API scores for all active sports every minute (covers all sports)
+  cron.schedule('* * * * *', async () => {
+    try {
+      const sports = await getActiveSports();
+      await fetchAllSportsScores(sports.map(s => s.key));
+    } catch (err) {
+      logger.error('Odds API scores worker error', { err });
+    }
+  });
+
+  // Auto-settle completed bets every 5 minutes using Odds API scores
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await settlePendingBets();
+    } catch (err) {
+      logger.error('Bet settlement worker error', { err });
+    }
+  });
+
   // Run one immediate ingestion pass on startup (non-blocking)
   setImmediate(async () => {
     try {
       await ingestAllOdds();
       await fetchAndCacheLiveScores();
+      const sports = await getActiveSports();
+      await fetchAllSportsScores(sports.map(s => s.key));
     } catch (err) {
       logger.error('Initial ingestion error', { err });
     }

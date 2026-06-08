@@ -12,6 +12,16 @@ const GROUP_TO_SPORT: Record<string, string> = {
   'Tennis': 'tennis',
   'Horse Racing': 'horse_racing',
   'Greyhound Racing': 'greyhound',
+  'American Football': 'american_football',
+  'Baseball': 'baseball',
+  'Ice Hockey': 'ice_hockey',
+  'Cricket': 'cricket',
+  'Rugby Union': 'rugby',
+  'Rugby League': 'rugby_league',
+  'Mixed Martial Arts': 'mma',
+  'Golf': 'golf',
+  'Australian Rules': 'aussie_rules',
+  'Boxing': 'boxing',
 };
 
 interface OddsApiSport {
@@ -120,7 +130,7 @@ function buildOddsRows(
 // Fetch all active sports from The Odds API (cached 30 min in Redis)
 const SPORTS_CACHE_KEY = 'odds_api:active_sports';
 
-async function getActiveSports(): Promise<Array<{ key: string; sport: string; league: string }>> {
+export async function getActiveSports(): Promise<Array<{ key: string; sport: string; league: string }>> {
   const cached = await redis.get(SPORTS_CACHE_KEY);
   if (cached) return JSON.parse(cached);
 
@@ -181,6 +191,11 @@ async function ingestOddsForSport(
       logger.error('odds_feed insert error', { message: error.message, sport: sportConfig.key });
       return 0;
     }
+
+    // Cache event_id → sport_key mapping so settlement can look it up after events leave odds_feed
+    await Promise.all(
+      eventIds.map(id => redis.setex(`event:sport_key:${id}`, 7 * 24 * 3600, sportConfig.key))
+    );
 
     // Bust Redis caches
     await redis.del(REDIS_KEYS.ALL_ODDS);

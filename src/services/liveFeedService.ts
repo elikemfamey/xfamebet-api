@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabase';
 import { getCachedLiveScores, LiveScore } from './liveScoreService';
+import { getAllCachedOddsApiScores, OddsApiScoreEntry } from './oddsApiScoreService';
 
 export interface LiveFeedTeam {
   name: string;
@@ -24,10 +25,10 @@ export interface LiveFeedMatch {
   kickedOffAt: string | null;
 }
 
-// API-Football status codes that indicate a match is actively in play
+// API-Football in-play status codes
 const IN_PLAY_STATUSES = new Set(['1H', 'HT', '2H', 'ET', 'BT', 'P', 'INT']);
 
-function deriveStatus(s: LiveScore): string {
+function deriveApiFbStatus(s: LiveScore): string {
   switch (s.status_short) {
     case 'HT': return 'HT';
     case 'BT': return 'BT';
@@ -58,28 +59,44 @@ interface OddsRow {
   starts_at: string | null;
 }
 
-function formatKickoffAsStatus(isoString: string): string {
+function formatKickoff(isoString: string): string {
   const d = new Date(isoString);
-  const month = d.getMonth() + 1;
-  const day = d.getDate();
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
+  const month = d.getMonth() + 1;
+  const day = d.getDate();
   return `${month}/${day} ${hh}:${mm}`;
 }
 
-export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
-  const now = new Date().toISOString();
+function extractH2H(rows: OddsRow[]) {
+  const h2h = rows.filter(r => r.market_type === 'match_winner');
+  return {
+    homeOdds: h2h.find(r => r.selection === 'home')?.odds_value,
+    drawOdds: h2h.find(r => r.selection === 'draw')?.odds_value,
+    awayOdds: h2h.find(r => r.selection === 'away')?.odds_value,
+    markets: rows.filter(r => r.market_type !== 'match_winner').length,
+  };
+}
 
-  const [liveScores, oddsResult, scriptedResult] = await Promise.all([
+function getScore(entry: OddsApiScoreEntry, side: 'home' | 'away'): string | null {
+  if (!entry.scores) return null;
+  const teamName = side === 'home' ? entry.home_team : entry.away_team;
+  return entry.scores.find(s => s.name === teamName)?.score ?? null;
+}
+
+export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
+  const now = new Date();
+
+  const [apiFbScores, oddsApiScores, oddsResult, scriptedResult] = await Promise.all([
     getCachedLiveScores(),
+    getAllCachedOddsApiScores(),
     supabase
       .from('odds_feed')
       .select('event_id, event_name, market_type, selection, odds_value, sport, league, starts_at')
       .eq('status', 'active')
-      .lte('starts_at', now)
       .not('sport', 'ilike', 'virtual_%')
       .order('updated_at', { ascending: false })
-      .limit(500),
+      .limit(1000),
     supabase
       .from('simulated_matches')
       .select('id, team_a, team_b, team_a_score, team_b_score, current_minute, sport, competition, league_name, home_logo, away_logo, started_at')
@@ -89,7 +106,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
 
   const allOdds: OddsRow[] = oddsResult.data ?? [];
 
-  // Group odds rows by event_id
+  // Group odds by event_id
   const byEvent = new Map<string, OddsRow[]>();
   for (const row of allOdds) {
     const list = byEvent.get(row.event_id) ?? [];
@@ -98,17 +115,79 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
   }
 
   const result: LiveFeedMatch[] = [];
-  const matchedEventIds = new Set<string>();
+  const processedEventIds = new Set<string>();
 
-  // 1. Process API-Football live matches (real scores, may or may not have odds)
+  // ── Step 1: Odds API scores — live events for ALL sports ────────────────────
+  // This covers basketball, tennis, baseball, MMA, etc. as well as football.
+  for (const [eventId, scoreData] of oddsApiScores) {
+    // Skip completed events (don't show finished games in live feed)
+    if (scoreData.completed) continue;
+    // Skip events that haven't started yet (no scores means not kicked off)
+    if (!scoreData.scores) continue;
+
+    const rows = byEvent.get(eventId) ?? [];
+    if (!rows.length) continue; // no odds on file for this event
+
+    const first = rows[0];
+    const eventSport = first.sport;
+
+    if (sport && eventSport !== sport) continue;
+
+    processedEventIds.add(eventId);
+
+    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(rows);
+    const homeScore = getScore(scoreData, 'home');
+    const awayScore = getScore(scoreData, 'away');
+
+    // For football, try to enrich with API-Football for minute elapsed + logos
+    let statusStr = 'LIVE';
+    let homeLogo: string | null = null;
+    let awayLogo: string | null = null;
+
+    if (eventSport === 'football') {
+      const apiFb = apiFbScores.find(s =>
+        IN_PLAY_STATUSES.has(s.status_short) &&
+        teamsMatch(s.home_team, scoreData.home_team) &&
+        teamsMatch(s.away_team, scoreData.away_team),
+      );
+      if (apiFb) {
+        statusStr = deriveApiFbStatus(apiFb);
+        homeLogo = apiFb.home_logo;
+        awayLogo = apiFb.away_logo;
+      }
+    }
+
+    result.push({
+      eventId,
+      oddsEventId: eventId,
+      league: first.league ?? 'Other',
+      sport: eventSport,
+      isLive: true,
+      status: statusStr,
+      home: { name: scoreData.home_team, logoUrl: homeLogo },
+      away: { name: scoreData.away_team, logoUrl: awayLogo },
+      homeScore,
+      awayScore,
+      odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
+      oddsLocked: homeOdds == null && awayOdds == null,
+      markets,
+      sportKey: scoreData.sport_key,
+      kickedOffAt: first.starts_at ?? null,
+    });
+  }
+
+  // ── Step 2: API-Football live football matches not already covered ───────────
+  // Useful for football games that kicked off but whose Odds API score isn't cached yet.
   if (!sport || sport === 'football') {
-    for (const score of liveScores) {
+    for (const score of apiFbScores) {
       if (!IN_PLAY_STATUSES.has(score.status_short)) continue;
 
+      // Find matching odds event by team name fuzzy match
       let matchedRows: OddsRow[] = [];
       let matchedEventId: string | null = null;
 
       for (const [eid, rows] of byEvent) {
+        if (processedEventIds.has(eid)) continue;
         const first = rows[0];
         if (first.sport !== 'football') continue;
         if (!first.event_name.includes(' vs ')) continue;
@@ -120,13 +199,9 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
         }
       }
 
-      if (matchedEventId) matchedEventIds.add(matchedEventId);
+      if (matchedEventId) processedEventIds.add(matchedEventId);
 
-      const h2h = matchedRows.filter(r => r.market_type === 'match_winner');
-      const homeOdds = h2h.find(r => r.selection === 'home')?.odds_value;
-      const drawOdds = h2h.find(r => r.selection === 'draw')?.odds_value;
-      const awayOdds = h2h.find(r => r.selection === 'away')?.odds_value;
-      const markets = matchedRows.filter(r => r.market_type !== 'match_winner').length;
+      const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchedRows);
 
       result.push({
         eventId: `af:${score.fixture_id}`,
@@ -134,7 +209,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
         league: score.league,
         sport: 'football',
         isLive: true,
-        status: deriveStatus(score),
+        status: deriveApiFbStatus(score),
         home: { name: score.home_team, logoUrl: score.home_logo },
         away: { name: score.away_team, logoUrl: score.away_logo },
         homeScore: String(score.home_score),
@@ -148,69 +223,56 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     }
   }
 
-  // 2. Scripted live matches — appear as real matches with live scores
+  // ── Step 3: Scripted live matches ────────────────────────────────────────────
   for (const match of scriptedResult.data ?? []) {
     const scriptEventId = `sim:${match.id}`;
-
     if (sport && match.sport !== sport) continue;
 
     const matchOddsRows = byEvent.get(scriptEventId) ?? [];
-    matchedEventIds.add(scriptEventId); // prevent duplicate in step 3
+    processedEventIds.add(scriptEventId);
 
-    const h2h     = matchOddsRows.filter(r => r.market_type === 'match_winner');
-    const homeOdds = h2h.find(r => r.selection === 'home')?.odds_value;
-    const drawOdds = h2h.find(r => r.selection === 'draw')?.odds_value;
-    const awayOdds = h2h.find(r => r.selection === 'away')?.odds_value;
-    const markets  = matchOddsRows.filter(r => r.market_type !== 'match_winner').length;
-
+    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchOddsRows);
     const minuteLabel = (match.current_minute ?? 0) > 0 ? `${match.current_minute}'` : 'LIVE';
 
     result.push({
-      eventId:     scriptEventId,
+      eventId: scriptEventId,
       oddsEventId: scriptEventId,
-      league:      match.competition ?? match.league_name ?? 'XfameBet League',
-      sport:       match.sport ?? 'football',
-      isLive:      true,
-      status:      minuteLabel,
-      home:        { name: match.team_a, logoUrl: match.home_logo ?? null },
-      away:        { name: match.team_b, logoUrl: match.away_logo ?? null },
-      homeScore:   String(match.team_a_score ?? 0),
-      awayScore:   String(match.team_b_score ?? 0),
-      odds:        [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
-      oddsLocked:  homeOdds == null,
+      league: match.competition ?? match.league_name ?? 'XfameBet League',
+      sport: match.sport ?? 'football',
+      isLive: true,
+      status: minuteLabel,
+      home: { name: match.team_a, logoUrl: match.home_logo ?? null },
+      away: { name: match.team_b, logoUrl: match.away_logo ?? null },
+      homeScore: String(match.team_a_score ?? 0),
+      awayScore: String(match.team_b_score ?? 0),
+      odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
+      oddsLocked: homeOdds == null,
       markets,
-      sportKey:    match.sport ?? 'football',
+      sportKey: match.sport ?? 'football',
       kickedOffAt: match.started_at ?? null,
     });
   }
 
-  // 3. Process Odds API events not matched to any API-Football fixture or scripted match
+  // ── Step 4: Fallback — odds_feed events past their start time with no score data ─
+  // These are games where Odds API hasn't provided scores yet but the game has started.
   for (const [eventId, rows] of byEvent) {
-    if (matchedEventIds.has(eventId)) continue;
+    if (processedEventIds.has(eventId)) continue;
 
     const first = rows[0];
+    if (!first.starts_at) continue;
+    if (new Date(first.starts_at) > now) continue; // not started yet
+
+    // If we have a score entry and it's completed, skip
+    const scoreEntry = oddsApiScores.get(eventId);
+    if (scoreEntry?.completed) continue;
+
     const eventSport = first.sport;
+    if (sport && eventSport !== sport) continue;
 
-    // Apply sport filter
-    if (sport) {
-      const matches =
-        sport === 'baseball'
-          ? eventSport.startsWith('baseball')
-          : eventSport === sport;
-      if (!matches) continue;
-    }
-
-    const h2h = rows.filter(r => r.market_type === 'match_winner');
-    const homeOdds = h2h.find(r => r.selection === 'home')?.odds_value;
-    const drawOdds = h2h.find(r => r.selection === 'draw')?.odds_value;
-    const awayOdds = h2h.find(r => r.selection === 'away')?.odds_value;
-    const markets = rows.filter(r => r.market_type !== 'match_winner').length;
-
+    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(rows);
     const [homeName = first.event_name, awayName = ''] = first.event_name.includes(' vs ')
       ? first.event_name.split(' vs ').map((s: string) => s.trim())
       : [first.event_name];
-
-    const statusStr = first.starts_at ? formatKickoffAsStatus(first.starts_at) : 'LIVE';
 
     result.push({
       eventId,
@@ -218,7 +280,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       league: first.league ?? 'Other',
       sport: eventSport,
       isLive: true,
-      status: statusStr,
+      status: formatKickoff(first.starts_at),
       home: { name: homeName, logoUrl: null },
       away: { name: awayName, logoUrl: null },
       homeScore: null,
@@ -227,9 +289,19 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       oddsLocked: homeOdds == null && awayOdds == null,
       markets,
       sportKey: eventSport,
-      kickedOffAt: first.starts_at ?? null,
+      kickedOffAt: first.starts_at,
     });
   }
+
+  // Sort: events with actual scores first, then those with odds, then locked
+  result.sort((a, b) => {
+    const aHasScore = a.homeScore !== null ? 1 : 0;
+    const bHasScore = b.homeScore !== null ? 1 : 0;
+    if (bHasScore !== aHasScore) return bHasScore - aHasScore;
+    const aLocked = a.oddsLocked ? 0 : 1;
+    const bLocked = b.oddsLocked ? 0 : 1;
+    return bLocked - aLocked;
+  });
 
   return result;
 }
