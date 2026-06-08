@@ -42,6 +42,8 @@ router.post('/register', validateBody(registerSchema), async (req, res) => {
     approval_status: 'pending',
   }).select().single();
 
+  await supabase.from('users').update({ role: 'affiliate' }).eq('id', req.user!.id);
+
   return sendSuccess(res, data, 201);
 });
 
