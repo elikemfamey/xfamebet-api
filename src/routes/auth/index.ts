@@ -98,12 +98,17 @@ router.post('/register', authLimiter, validateBody(registerSchema), async (req, 
     if (referral_code) {
       const { data: refUser } = await supabase
         .from('users')
-        .select('id, affiliate_id')
+        .select('id')
         .eq('referral_code', referral_code)
         .single();
       if (refUser) {
         referredById = refUser.id;
-        affiliateId = refUser.affiliate_id;
+        const { data: aff } = await supabase
+          .from('affiliates')
+          .select('id')
+          .eq('user_id', refUser.id)
+          .single();
+        affiliateId = aff?.id ?? null;
       }
     }
 
@@ -426,8 +431,12 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
     let affiliateId: string | null = null;
     let referredById: string | null = null;
     if (referral_code) {
-      const { data: refUser } = await supabase.from('users').select('id, affiliate_id').eq('referral_code', referral_code).single();
-      if (refUser) { referredById = refUser.id; affiliateId = refUser.affiliate_id; }
+      const { data: refUser } = await supabase.from('users').select('id').eq('referral_code', referral_code).single();
+      if (refUser) {
+        referredById = refUser.id;
+        const { data: aff } = await supabase.from('affiliates').select('id').eq('user_id', refUser.id).single();
+        affiliateId = aff?.id ?? null;
+      }
     }
 
     const suffix = Math.random().toString(36).slice(2, 7);
