@@ -138,14 +138,20 @@ router.post('/register', authLimiter, validateBody(registerSchema), async (req, 
       referral_code,
     });
 
-    // Track affiliate click conversion
+    // Track affiliate click conversion and create referral record
     if (affiliateId && referral_code) {
-      await supabase.from('affiliate_clicks')
-        .update({ converted: true, converted_user_id: user.id })
-        .eq('referral_code', referral_code)
-        .is('converted_user_id', null)
-        .order('created_at', { ascending: false })
-        .limit(1);
+      await Promise.all([
+        supabase.from('affiliate_clicks')
+          .update({ converted: true, converted_user_id: user.id })
+          .eq('referral_code', referral_code)
+          .is('converted_user_id', null)
+          .order('created_at', { ascending: false })
+          .limit(1),
+        supabase.from('affiliate_referrals').insert({
+          affiliate_id: affiliateId,
+          referred_user_id: user.id,
+        }),
+      ]);
     }
 
     // Apply promo code bonus
@@ -461,6 +467,22 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
     FraudService.emitEvent(user.id, 'registration', { ip: req.ip, device: req.headers['user-agent'], phone }).catch(
       (err) => logger.error('register-phone fraud event failed', { err })
     );
+
+    // Track affiliate click conversion and create referral record
+    if (affiliateId && referral_code) {
+      await Promise.all([
+        supabase.from('affiliate_clicks')
+          .update({ converted: true, converted_user_id: user.id })
+          .eq('referral_code', referral_code)
+          .is('converted_user_id', null)
+          .order('created_at', { ascending: false })
+          .limit(1),
+        supabase.from('affiliate_referrals').insert({
+          affiliate_id: affiliateId,
+          referred_user_id: user.id,
+        }),
+      ]);
+    }
 
     let smsSent = true;
     try {
