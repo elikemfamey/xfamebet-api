@@ -47,7 +47,7 @@ const payoutSettingsSchema = z.object({
 });
 
 const ngBankSchema = z.object({
-  amount: z.number().min(100),
+  amount: z.number().min(30000),
   bank_name: z.string(),
   account_name: z.string(),
   reference: z.string(),
@@ -224,11 +224,11 @@ router.get('/payment-info', authenticate, asyncHandler(async (_req, res) => {
       binance_uid: env.BINANCE_UID || null,
       binance_name: env.BINANCE_NAME || null,
     },
-    minimums: { crypto_usd: 30, momo_ghs: 300, bank_ngn: 5000 },
+    minimums: { crypto_usd: 30, momo_ghs: 300, bank_ngn: 30000 },
     quick_picks: {
       crypto_usd: [30, 50, 100, 200, 500],
       momo_ghs: [300, 500, 1000, 1500, 2000],
-      bank_ngn: [5000, 10000, 20000, 50000, 100000],
+      bank_ngn: [30000, 50000, 100000, 200000, 500000],
     },
   });
 }));
