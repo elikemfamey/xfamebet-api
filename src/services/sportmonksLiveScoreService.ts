@@ -150,77 +150,72 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
     return [];
   }
 
-  try {
-    const resp = await axios.get(`${BASE_URL}/livescores/inplay`, {
-      params: {
-        api_token: env.SPORTMONKS_API_TOKEN,
-        include: 'participants;scores;state;league;statistics.type;events.type',
-      },
-      timeout: 12000,
-    });
+  const resp = await axios.get(`${BASE_URL}/livescores/inplay`, {
+    params: {
+      api_token: env.SPORTMONKS_API_TOKEN,
+      include: 'participants;scores;state;league;statistics.type;events.type',
+    },
+    timeout: 12000,
+  });
 
-    const fixtures: any[] = resp.data?.data ?? [];
-    const scores: LiveScore[] = [];
-    const enriched: any[] = [];
+  const fixtures: any[] = resp.data?.data ?? [];
+  const scores: LiveScore[] = [];
+  const enriched: any[] = [];
 
-    for (const f of fixtures) {
-      const participants: any[] = f.participants ?? [];
-      const home = participants.find((p: any) => p.meta?.location === 'home');
-      const away = participants.find((p: any) => p.meta?.location === 'away');
-      if (!home || !away) continue;
+  for (const f of fixtures) {
+    const participants: any[] = f.participants ?? [];
+    const home = participants.find((p: any) => p.meta?.location === 'home');
+    const away = participants.find((p: any) => p.meta?.location === 'away');
+    if (!home || !away) continue;
 
-      const developerName: string = f.state?.developer_name ?? '';
-      const statusShort = STATE_TO_STATUS[developerName] ?? '';
-      if (!IN_PLAY_STATES.has(developerName)) continue; // skip non-live states
+    const developerName: string = f.state?.developer_name ?? '';
+    const statusShort = STATE_TO_STATUS[developerName] ?? '';
+    if (!IN_PLAY_STATES.has(developerName)) continue;
 
-      const minute = computeMinute(f.starting_at ?? null, developerName);
+    const minute = computeMinute(f.starting_at ?? null, developerName);
 
-      const scoreObjs: any[] = f.scores ?? [];
-      const homeGoals = scoreObjs.find((s: any) => s.participant_id === home.id && s.description === 'CURRENT')?.score?.goals ?? 0;
-      const awayGoals = scoreObjs.find((s: any) => s.participant_id === away.id && s.description === 'CURRENT')?.score?.goals ?? 0;
+    const scoreObjs: any[] = f.scores ?? [];
+    const homeGoals = scoreObjs.find((s: any) => s.participant_id === home.id && s.description === 'CURRENT')?.score?.goals ?? 0;
+    const awayGoals = scoreObjs.find((s: any) => s.participant_id === away.id && s.description === 'CURRENT')?.score?.goals ?? 0;
 
-      const ls: LiveScore = {
-        fixture_id: f.id,
-        home_team: home.name,
-        away_team: away.name,
-        home_logo: home.image_path ?? null,
-        away_logo: away.image_path ?? null,
-        home_score: homeGoals,
-        away_score: awayGoals,
-        minute,
-        status_short: statusShort,
-        league: f.league?.name ?? '',
-        country: f.league?.country?.name ?? '',
-      };
+    const ls: LiveScore = {
+      fixture_id: f.id,
+      home_team: home.name,
+      away_team: away.name,
+      home_logo: home.image_path ?? null,
+      away_logo: away.image_path ?? null,
+      home_score: homeGoals,
+      away_score: awayGoals,
+      minute,
+      status_short: statusShort,
+      league: f.league?.name ?? '',
+      country: f.league?.country?.name ?? '',
+    };
 
-      scores.push(ls);
-      enriched.push({ fixture: f, homeId: home.id, ls });
-    }
-
-    if (scores.length > 0) {
-      await redis.setex(REDIS_KEY, TTL, JSON.stringify(scores));
-      logger.info(`[SportMonks] Cached ${scores.length} live matches`);
-
-      const feedKeys = await redis.keys('live_feed:*');
-      if (feedKeys.length > 0) await redis.del(...feedKeys);
-
-      broadcastLiveScoresUpdate(scores.length);
-
-      persistFixtureLogos(
-        scores.flatMap(s => [
-          { teamName: s.home_team, logoUrl: s.home_logo, source: 'sportmonks' as const },
-          { teamName: s.away_team, logoUrl: s.away_logo, source: 'sportmonks' as const },
-        ]),
-      );
-
-      await broadcastFixtureDetails(enriched);
-    }
-
-    return scores;
-  } catch (err: any) {
-    logger.error('[SportMonks] Fetch error', { message: err.message });
-    return [];
+    scores.push(ls);
+    enriched.push({ fixture: f, homeId: home.id, ls });
   }
+
+  if (scores.length > 0) {
+    await redis.setex(REDIS_KEY, TTL, JSON.stringify(scores));
+    logger.info(`[SportMonks] Cached ${scores.length} live matches`);
+
+    const feedKeys = await redis.keys('live_feed:*');
+    if (feedKeys.length > 0) await redis.del(...feedKeys);
+
+    broadcastLiveScoresUpdate(scores.length);
+
+    persistFixtureLogos(
+      scores.flatMap(s => [
+        { teamName: s.home_team, logoUrl: s.home_logo, source: 'sportmonks' as const },
+        { teamName: s.away_team, logoUrl: s.away_logo, source: 'sportmonks' as const },
+      ]),
+    );
+
+    await broadcastFixtureDetails(enriched);
+  }
+
+  return scores;
 }
 
 // ─── Per-fixture socket broadcasting ─────────────────────────────────────────

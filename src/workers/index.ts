@@ -1,11 +1,21 @@
 import cron from 'node-cron';
 import { supabase } from '../config/supabase';
 import { ingestAllOdds, getActiveSports } from '../services/oddsIngestionService';
-import { fetchAndCacheLiveScores } from '../services/sportmonksLiveScoreService';
+import { fetchAndCacheLiveScores as fetchFromSportMonks } from '../services/sportmonksLiveScoreService';
+import { fetchAndCacheLiveScores as fetchFromApiFootball } from '../services/liveScoreService';
 import { fetchAllSportsScores } from '../services/oddsApiScoreService';
 import { settlePendingBets } from '../services/betSettlementService';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { logger } from '../utils/logger';
+
+async function fetchLiveScores(): Promise<void> {
+  try {
+    await fetchFromSportMonks();
+  } catch (smErr: any) {
+    logger.warn('[LiveScores] SportMonks failed, falling back to api-football', { message: smErr.message });
+    await fetchFromApiFootball();
+  }
+}
 
 export function startWorkers() {
   // Reset responsible gambling daily counters at midnight
@@ -103,10 +113,10 @@ export function startWorkers() {
     }
   });
 
-  // Fetch live scores from API-Football every minute (football detail: minute, possession)
+  // Fetch live scores every minute — SportMonks primary, api-football fallback
   cron.schedule('* * * * *', async () => {
     try {
-      await fetchAndCacheLiveScores();
+      await fetchLiveScores();
     } catch (err) {
       logger.error('Live scores worker error', { err });
     }
@@ -135,7 +145,7 @@ export function startWorkers() {
   setImmediate(async () => {
     try {
       await ingestAllOdds();
-      await fetchAndCacheLiveScores();
+      await fetchLiveScores();
       const sports = await getActiveSports();
       await fetchAllSportsScores(sports.map(s => s.key));
     } catch (err) {
