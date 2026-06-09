@@ -13,7 +13,7 @@ export interface OddsApiScoreEntry {
   last_update: string | null;
 }
 
-const SCORE_TTL = 60; // 60 seconds — matches live scoring cadence
+const SCORE_TTL = 150; // 150 seconds — outlasts the 2-min poller interval so cache never goes dark
 
 function scoreKey(sportKey: string) {
   return `scores:odds_api:${sportKey}`;
