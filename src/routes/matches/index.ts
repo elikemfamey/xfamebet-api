@@ -114,6 +114,28 @@ router.get('/popular', async (req, res) => {
   }
 });
 
+// GET /matches/football/live-stats - cached stats for all live football fixtures
+// Returns Record<"af:{fixtureId}", FixtureStats> so the frontend can enrich live cards
+router.get('/football/live-stats', async (req, res) => {
+  try {
+    const scores = await getCachedLiveScores();
+    if (!scores.length) return sendSuccess(res, {});
+
+    const keys = scores.map(s => `stats:af:${s.fixture_id}`);
+    const raw = await redis.mget(...keys);
+
+    const result: Record<string, unknown> = {};
+    for (let i = 0; i < scores.length; i++) {
+      if (raw[i]) {
+        result[`af:${scores[i].fixture_id}`] = JSON.parse(raw[i]!);
+      }
+    }
+    return sendSuccess(res, result);
+  } catch {
+    return sendError(res, 'Failed to fetch live stats', 500);
+  }
+});
+
 // GET /matches/:eventId/odds - all markets for an event
 router.get('/:eventId/odds', async (req, res) => {
   const cached = await redis.get(REDIS_KEYS.LIVE_ODDS(req.params.eventId));

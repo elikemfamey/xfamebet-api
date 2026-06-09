@@ -222,6 +222,11 @@ async function broadcastFixtureDetails(fixtures: any[]): Promise<void> {
     // Broadcast to room if anyone is subscribed
     broadcastFixtureUpdate(fixtureId, { home: homeScore, away: awayScore }, minute, statusShort, stats, newCommentary);
 
+    // Cache latest stats for REST endpoint access (same TTL as live scores)
+    if (stats) {
+      pipeline.setex(`stats:af:${fixtureId}`, TTL, JSON.stringify(stats));
+    }
+
     // Persist updated seen-events set (4h TTL covers any match duration)
     if (allSigs.length > 0) {
       pipeline.setex(`apifb:events:${fixtureId}`, 4 * 3600, JSON.stringify(allSigs));
