@@ -529,6 +529,61 @@ router.patch('/admin/:id/odds', authenticate, requireAdmin, validateBody(z.objec
   return sendSuccess(res, { message: 'Odds updated' });
 });
 
+// ── Admin: get market statuses ────────────────────────────────────────────────
+
+router.get('/admin/:id/markets', authenticate, requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { data } = await supabase
+    .from('odds_feed')
+    .select('market_type, status')
+    .eq('event_id', `sim:${id}`)
+    .eq('source', 'simulation');
+
+  if (!data) return sendSuccess(res, []);
+
+  // Collapse to one entry per market_type — locked if ANY selection is suspended
+  const byMarket: Record<string, string> = {};
+  for (const row of data) {
+    if (!byMarket[row.market_type] || row.status === 'suspended') {
+      byMarket[row.market_type] = row.status;
+    }
+  }
+
+  const markets = Object.entries(byMarket).map(([market_type, status]) => ({
+    market_type,
+    locked: status === 'suspended',
+  }));
+
+  return sendSuccess(res, markets);
+});
+
+// ── Admin: lock / unlock a market ─────────────────────────────────────────────
+
+router.patch('/admin/:id/market-lock', authenticate, requireAdmin, validateBody(z.object({
+  market_type: z.string().min(1),
+  locked: z.boolean(),
+})), async (req, res) => {
+  const { id } = req.params;
+  const { market_type, locked } = req.body;
+  const eventId = `sim:${id}`;
+  const newStatus = locked ? 'suspended' : 'active';
+
+  await supabase.from('odds_feed')
+    .update({ status: newStatus, updated_at: new Date().toISOString() })
+    .eq('event_id', eventId)
+    .eq('market_type', market_type)
+    .eq('source', 'simulation');
+
+  try {
+    getIO().emit(locked ? 'odds:suspended' : 'odds:active', { eventId, market_type });
+  } catch {}
+
+  const { data: match } = await supabase.from('simulated_matches').select('sport').eq('id', id).single();
+  await bustLiveFeedCache((match as any)?.sport);
+
+  return sendSuccess(res, { message: locked ? 'Market locked' : 'Market unlocked' });
+});
+
 // ── Admin: inject event ───────────────────────────────────────────────────────
 
 router.post('/admin/:id/inject-event', authenticate, requireAdmin, validateBody(z.object({
