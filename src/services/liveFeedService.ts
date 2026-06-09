@@ -57,6 +57,7 @@ interface OddsRow {
   sport: string;
   league: string | null;
   starts_at: string | null;
+  status: string;
 }
 
 function formatKickoff(isoString: string): string {
@@ -70,11 +71,13 @@ function formatKickoff(isoString: string): string {
 
 function extractH2H(rows: OddsRow[]) {
   const h2h = rows.filter(r => r.market_type === 'match_winner');
+  const suspended = h2h.some(r => r.status === 'suspended');
   return {
     homeOdds: h2h.find(r => r.selection === 'home')?.odds_value,
     drawOdds: h2h.find(r => r.selection === 'draw')?.odds_value,
     awayOdds: h2h.find(r => r.selection === 'away')?.odds_value,
     markets: rows.filter(r => r.market_type !== 'match_winner').length,
+    suspended,
   };
 }
 
@@ -92,8 +95,8 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     getAllCachedOddsApiScores(),
     supabase
       .from('odds_feed')
-      .select('event_id, event_name, market_type, selection, odds_value, sport, league, starts_at')
-      .eq('status', 'active')
+      .select('event_id, event_name, market_type, selection, odds_value, sport, league, starts_at, status')
+      .in('status', ['active', 'suspended'])
       .not('sport', 'ilike', 'virtual_%')
       .order('updated_at', { ascending: false })
       .limit(1000),
@@ -230,7 +233,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     const matchOddsRows = byEvent.get(scriptEventId) ?? [];
     processedEventIds.add(scriptEventId);
 
-    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchOddsRows);
+    const { homeOdds, drawOdds, awayOdds, markets, suspended } = extractH2H(matchOddsRows);
     const minuteLabel = (match.current_minute ?? 0) > 0 ? `${match.current_minute}'` : 'LIVE';
 
     result.push({
@@ -245,7 +248,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       homeScore: String(match.team_a_score ?? 0),
       awayScore: String(match.team_b_score ?? 0),
       odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
-      oddsLocked: homeOdds == null,
+      oddsLocked: suspended || homeOdds == null,
       markets,
       sportKey: match.sport ?? 'football',
       kickedOffAt: match.started_at ?? null,

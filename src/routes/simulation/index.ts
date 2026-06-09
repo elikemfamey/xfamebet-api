@@ -292,6 +292,12 @@ router.post('/admin/:id/start', authenticate, requireAdmin, async (req, res) => 
     .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null })
     .eq('id', id);
 
+  // Ensure any accidentally-suspended odds are cleared before the match goes live
+  await supabase.from('odds_feed')
+    .update({ status: 'active' })
+    .eq('event_id', `sim:${id}`)
+    .eq('source', 'simulation');
+
   if ((match as any).is_scripted) {
     await ScriptedMatchEngine.startMatch(id);
   } else {
@@ -327,6 +333,12 @@ router.post('/admin/:id/pause', authenticate, requireAdmin, async (req, res) => 
 router.post('/admin/:id/resume', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
+
+  // Clear any suspended odds before resuming
+  await supabase.from('odds_feed')
+    .update({ status: 'active' })
+    .eq('event_id', `sim:${id}`)
+    .eq('source', 'simulation');
 
   if ((match as any)?.is_scripted) await ScriptedMatchEngine.resumeMatch(id);
   else SimulationEngine.resumeMatch(id);
