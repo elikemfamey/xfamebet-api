@@ -14,7 +14,7 @@ import { authLimiter } from '../../middleware/rateLimiter';
 import { validateBody } from '../../middleware/validate';
 import { FraudService } from '../../services/fraudService';
 import { NotificationService } from '../../services/notificationService';
-import { sendOtpSms } from '../../services/smsService';
+import { sendOtpSms, SmsError } from '../../services/smsService';
 import { env } from '../../config/env';
 
 const router = Router();
@@ -487,7 +487,7 @@ router.post('/send-otp', authenticate, async (req, res) => {
   try {
     await sendOtpSms(user.phone, otp, user.country ?? 'GH');
   } catch (smsErr) {
-    const e = smsErr as Error & { permanent?: boolean };
+    const e = smsErr instanceof SmsError ? smsErr : new SmsError('SMS delivery failed. Please try again.', false);
     logger.error('send-otp sms failed', { smsErr, phone: user.phone });
     return sendError(res, e.permanent ? 'SMS is blocked on this number by your carrier.' : 'SMS delivery failed. Please try again.', 503);
   }
@@ -526,7 +526,7 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
     try {
       await sendOtpSms(phone, otp, country);
     } catch (smsErr) {
-      const e = smsErr as Error & { permanent?: boolean };
+      const e = smsErr instanceof SmsError ? smsErr : new SmsError('SMS delivery failed. Please try again.', false);
       logger.error('register-phone sms failed', { smsErr, phone });
       smsSent = false;
       if (e.permanent) smsErrMsg = 'SMS is blocked on this number by your carrier. Please contact support.';
@@ -568,7 +568,7 @@ router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (re
     try {
       await sendOtpSms(pending.phone, otp, pending.country ?? 'GH');
     } catch (smsErr) {
-      const e = smsErr as Error & { permanent?: boolean };
+      const e = smsErr instanceof SmsError ? smsErr : new SmsError('SMS delivery failed. Please try again.', false);
       logger.error('resend-otp sms failed', { smsErr, phone: pending.phone });
       smsSent = false;
       if (e.permanent) smsErrMsg = 'SMS is blocked on this number by your carrier. Please contact support.';
@@ -595,7 +595,7 @@ router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (re
   try {
     await sendOtpSms(user.phone, otp, user.country ?? 'GH');
   } catch (smsErr) {
-    const e = smsErr as Error & { permanent?: boolean };
+    const e = smsErr instanceof SmsError ? smsErr : new SmsError('SMS delivery failed. Please try again.', false);
     logger.error('resend-otp (db user) sms failed', { smsErr, phone: user.phone });
     const msg = e.permanent
       ? 'SMS is blocked on this number by your carrier. Please contact support.'

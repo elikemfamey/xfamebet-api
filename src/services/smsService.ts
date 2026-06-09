@@ -1,3 +1,4 @@
+import axios from 'axios';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 
@@ -33,8 +34,9 @@ const COUNTRY_CODES: Record<string, string> = {
   RW: '250',
 };
 
-// Normalizes any phone format to E.164 (required by Africa's Talking)
-// e.g. "0244123456" (GH) → "+233244123456"
+// Statuses from Africa's Talking that Termii can recover from
+const TERMII_FALLBACK_STATUSES = new Set(['DoNotDisturbRejection', 'UserInBlacklist']);
+
 function toE164(phone: string, country = 'GH'): string {
   const cleaned = phone.replace(/[\s\-().]/g, '');
   if (cleaned.startsWith('+')) return cleaned;
@@ -42,6 +44,47 @@ function toE164(phone: string, country = 'GH'): string {
   if (cleaned.startsWith('0')) return `+${code}${cleaned.slice(1)}`;
   if (cleaned.startsWith(code)) return `+${cleaned}`;
   return `+${code}${cleaned}`;
+}
+
+// Nigeria uses "dnd" channel to bypass NCC DND registry; all others use "generic"
+function termiiChannel(phone: string): 'dnd' | 'generic' {
+  return phone.startsWith('+234') ? 'dnd' : 'generic';
+}
+
+async function sendViaTermii(phone: string, message: string): Promise<void> {
+  if (!env.TERMII_API_KEY) {
+    throw new Error('Termii API key not configured');
+  }
+
+  const channel = termiiChannel(phone);
+
+  const { data } = await axios.post(
+    'https://v3.api.termii.com/api/sms/send',
+    {
+      to: phone,
+      from: env.TERMII_SENDER_ID,
+      sms: message,
+      type: 'plain',
+      channel,
+      api_key: env.TERMII_API_KEY,
+    },
+    { timeout: 10000 },
+  );
+
+  // Termii returns 200 even for some failures — check the message field
+  if (!data?.message_id && data?.message !== 'Successfully Sent') {
+    throw new Error(`Termii delivery failed: ${data?.message ?? 'unknown error'}`);
+  }
+
+  logger.info('sms_sent_termii', { phone, channel });
+}
+
+export class SmsError extends Error {
+  permanent: boolean;
+  constructor(message: string, permanent: boolean) {
+    super(message);
+    this.permanent = permanent;
+  }
 }
 
 export async function sendOtpSms(phone: string, otp: string, country = 'GH'): Promise<void> {
@@ -53,22 +96,45 @@ export async function sendOtpSms(phone: string, otp: string, country = 'GH'): Pr
   const normalizedPhone = toE164(phone, country);
   const message = `Your XfameBet code is: ${otp}. Valid for 10 mins. Never share this code.`;
 
-  const result = await sms.send({
-    to: [normalizedPhone],
-    message,
-    ...(env.AT_SENDER_ID ? { from: env.AT_SENDER_ID } : {}),
-  });
+  // --- Try Africa's Talking first ---
+  let atStatus: string | undefined;
+  try {
+    const result = await sms.send({
+      to: [normalizedPhone],
+      message,
+      ...(env.AT_SENDER_ID ? { from: env.AT_SENDER_ID } : {}),
+    });
 
-  const recipient = result.SMSMessageData.Recipients[0];
-  if (!recipient || recipient.status !== 'Success') {
-    logger.error('sms_delivery_failed', { phone: normalizedPhone, status: recipient?.status });
-    const permanent = recipient?.status === 'DoNotDisturbRejection' || recipient?.status === 'UserInBlacklist';
-    const err = new Error(
-      permanent ? 'SMS is blocked on this number by your carrier.' : 'SMS delivery failed. Please try again.',
-    ) as Error & { permanent: boolean };
-    err.permanent = permanent;
-    throw err;
+    const recipient = result.SMSMessageData.Recipients[0];
+    atStatus = recipient?.status;
+
+    if (recipient?.status === 'Success') {
+      logger.info('sms_sent', { phone: normalizedPhone, provider: 'africastalking' });
+      return;
+    }
+
+    logger.warn('sms_at_failed', { phone: normalizedPhone, status: atStatus });
+  } catch (err) {
+    logger.warn('sms_at_error', { phone: normalizedPhone, err });
   }
 
-  logger.info('sms_sent', { phone: normalizedPhone });
+  // --- Fallback to Termii for DND/blacklist rejections or AT errors ---
+  if (!atStatus || TERMII_FALLBACK_STATUSES.has(atStatus)) {
+    try {
+      await sendViaTermii(normalizedPhone, message);
+      return;
+    } catch (termiiErr) {
+      logger.error('sms_termii_failed', { phone: normalizedPhone, termiiErr });
+    }
+  }
+
+  // Both providers failed — classify the error
+  logger.error('sms_delivery_failed', { phone: normalizedPhone, status: atStatus });
+  const permanent = atStatus === 'DoNotDisturbRejection' || atStatus === 'UserInBlacklist';
+  throw new SmsError(
+    permanent
+      ? 'SMS is blocked on this number by your carrier. Please contact support.'
+      : 'SMS delivery failed. Please try again.',
+    permanent,
+  );
 }

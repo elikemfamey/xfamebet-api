@@ -51,6 +51,9 @@ export const env = {
   AT_API_KEY: process.env.AT_API_KEY || '',
   AT_USERNAME: process.env.AT_USERNAME || 'sandbox',
   AT_SENDER_ID: process.env.AT_SENDER_ID || '',
+
+  TERMII_API_KEY: process.env.TERMII_API_KEY || '',
+  TERMII_SENDER_ID: process.env.TERMII_SENDER_ID || 'XfameBet',
 };
 
 export function validateEnv() {
