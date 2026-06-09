@@ -58,11 +58,16 @@ async function sendViaTermii(phone: string, message: string): Promise<void> {
 
   const channel = termiiChannel(phone);
 
+  // DND channel (Nigeria) requires a Termii-registered sender — omit `from`
+  // to use Termii's pre-approved default transactional sender for NG DND routing.
+  // For generic channel, use the configured sender ID if set.
+  const from = channel === 'dnd' ? undefined : (env.TERMII_SENDER_ID || undefined);
+
   const { data } = await axios.post(
     'https://v3.api.termii.com/api/sms/send',
     {
       to: phone,
-      from: env.TERMII_SENDER_ID,
+      ...(from ? { from } : {}),
       sms: message,
       type: 'plain',
       channel,
