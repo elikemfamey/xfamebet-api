@@ -602,7 +602,7 @@ export class ScriptedMatchEngine {
 
   static async generateOdds(
     matchId: string,
-    overrides?: { homeOdds?: number; drawOdds?: number; awayOdds?: number },
+    overrides?: { homeOdds?: number; drawOdds?: number; awayOdds?: number; correctScoreOdds?: Record<string, number> },
   ) {
     const { data: match } = await supabase
       .from('simulated_matches')
@@ -682,6 +682,21 @@ export class ScriptedMatchEngine {
       // Cards
       { ...base, market_type: 'cards',              selection: 'over_3.5',      odds_value: 1.90 },
       { ...base, market_type: 'cards',              selection: 'under_3.5',     odds_value: 1.90 },
+      // Correct score (inserted only when admin provides custom odds for this market)
+      ...(overrides?.correctScoreOdds !== undefined
+        ? Object.entries({
+            '0-0': 7.00, '1-0': 5.50, '0-1': 7.00, '1-1': 5.00,
+            '2-0': 8.00, '0-2': 10.00, '2-1': 7.00, '1-2': 9.00,
+            '2-2': 12.00, '3-0': 14.00, '0-3': 18.00, '3-1': 12.00,
+            '1-3': 16.00, '3-2': 20.00, '2-3': 25.00, 'other': 28.00,
+            ...overrides.correctScoreOdds,
+          }).map(([score, odds]) => ({
+            ...base,
+            market_type: 'correct_score',
+            selection: score,
+            odds_value: odds as number,
+          }))
+        : []),
     ];
 
     await supabase.from('odds_feed').upsert(rows, { onConflict: 'event_id,market_type,selection' });

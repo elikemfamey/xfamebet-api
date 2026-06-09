@@ -133,13 +133,16 @@ const createSchema = z.object({
   initial_draw_odds: z.number().min(1.01).optional(),
   initial_away_odds: z.number().min(1.01).optional(),
 
+  // Correct score odds (keyed by score string e.g. "1-0", "other")
+  correct_score_odds: z.record(z.string(), z.number().min(1.01)).optional(),
+
   // Markets
   markets: z.array(z.string()).default(['match_winner', 'over_under', 'btts']),
 
   // Scheduling — use 'now' to start immediately or an ISO datetime string
   scheduled_at: z.enum(['now']).or(z.string().datetime()).default('now'),
 
-  // Scripted match fields
+  // Scripted match
   is_scripted:     z.boolean().default(false),
   script_events:   z.array(scriptEventSchema).default([]),
   script_stats:    scriptStatsSchema.optional(),
@@ -148,20 +151,21 @@ const createSchema = z.object({
 });
 
 const editSchema = z.object({
-  team_a:            z.string().min(1).optional(),
-  team_b:            z.string().min(1).optional(),
-  home_logo:         z.string().url().optional(),
-  away_logo:         z.string().url().optional(),
-  competition:       z.string().optional(),
-  venue:             z.string().optional(),
-  scheduled_at:      z.string().datetime().optional(),
-  initial_home_odds: z.number().min(1.01).optional(),
-  initial_draw_odds: z.number().min(1.01).optional(),
-  initial_away_odds: z.number().min(1.01).optional(),
-  markets:           z.array(z.string()).optional(),
-  script_events:     z.array(scriptEventSchema).optional(),
-  script_stats:      scriptStatsSchema.optional(),
-  declared_result:   z.enum(['home', 'draw', 'away']).optional(),
+  team_a:               z.string().min(1).optional(),
+  team_b:               z.string().min(1).optional(),
+  home_logo:            z.string().url().optional(),
+  away_logo:            z.string().url().optional(),
+  competition:          z.string().optional(),
+  venue:                z.string().optional(),
+  scheduled_at:         z.string().datetime().optional(),
+  initial_home_odds:    z.number().min(1.01).optional(),
+  initial_draw_odds:    z.number().min(1.01).optional(),
+  initial_away_odds:    z.number().min(1.01).optional(),
+  correct_score_odds:   z.record(z.string(), z.number().min(1.01)).optional(),
+  markets:              z.array(z.string()).optional(),
+  script_events:        z.array(scriptEventSchema).optional(),
+  script_stats:         scriptStatsSchema.optional(),
+  declared_result:      z.enum(['home', 'draw', 'away']).optional(),
 });
 
 // ── Admin: create ─────────────────────────────────────────────────────────────
@@ -224,12 +228,14 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
       homeOdds: body.initial_home_odds,
       drawOdds: body.initial_draw_odds,
       awayOdds: body.initial_away_odds,
+      correctScoreOdds: body.correct_score_odds,
     });
   } else {
     await SimulationEngine.generateOdds(data.id, data.team_a_strength, data.team_b_strength, {
       homeOdds: body.initial_home_odds,
       drawOdds: body.initial_draw_odds,
       awayOdds: body.initial_away_odds,
+      correctScoreOdds: body.correct_score_odds,
     });
   }
 
@@ -267,13 +273,24 @@ router.patch('/admin/:id/edit', authenticate, requireAdmin, validateBody(editSch
   if (error) return sendError(res, error.message, 500);
 
   // Re-generate odds if any odds field changed
-  const oddsChanged = b.initial_home_odds !== undefined || b.initial_draw_odds !== undefined || b.initial_away_odds !== undefined;
+  const oddsChanged = b.initial_home_odds !== undefined || b.initial_draw_odds !== undefined
+    || b.initial_away_odds !== undefined || b.correct_score_odds !== undefined;
   if (oddsChanged) {
     const { data: m } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
     if ((m as any)?.is_scripted) {
-      await ScriptedMatchEngine.generateOdds(id, { homeOdds: b.initial_home_odds, drawOdds: b.initial_draw_odds, awayOdds: b.initial_away_odds });
+      await ScriptedMatchEngine.generateOdds(id, {
+        homeOdds: b.initial_home_odds,
+        drawOdds: b.initial_draw_odds,
+        awayOdds: b.initial_away_odds,
+        correctScoreOdds: b.correct_score_odds,
+      });
     } else {
-      await SimulationEngine.generateOdds(id, 6, 6, { homeOdds: b.initial_home_odds, drawOdds: b.initial_draw_odds, awayOdds: b.initial_away_odds });
+      await SimulationEngine.generateOdds(id, 6, 6, {
+        homeOdds: b.initial_home_odds,
+        drawOdds: b.initial_draw_odds,
+        awayOdds: b.initial_away_odds,
+        correctScoreOdds: b.correct_score_odds,
+      });
     }
   }
 

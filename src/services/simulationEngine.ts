@@ -80,6 +80,18 @@ const COMMENTARY_TEMPLATES = {
   pressure: ['{team} building pressure now.', '{team} dominating possession.'],
 };
 
+const DEFAULT_CORRECT_SCORE_ODDS: Record<string, number> = {
+  '0-0': 7.00, '1-0': 5.50, '0-1': 7.00, '1-1': 5.00,
+  '2-0': 8.00, '0-2': 10.00, '2-1': 7.00, '1-2': 9.00,
+  '2-2': 12.00, '3-0': 14.00, '0-3': 18.00, '3-1': 12.00,
+  '1-3': 16.00, '3-2': 20.00, '2-3': 25.00, 'other': 28.00,
+};
+
+const STANDARD_CORRECT_SCORES = [
+  '0-0','1-0','0-1','1-1','2-0','0-2','2-1','1-2',
+  '2-2','3-0','0-3','3-1','1-3','3-2','2-3',
+];
+
 function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -553,7 +565,7 @@ export class SimulationEngine {
     matchId: string,
     teamAStrength: number,
     teamBStrength: number,
-    overrides?: { homeOdds?: number; drawOdds?: number; awayOdds?: number },
+    overrides?: { homeOdds?: number; drawOdds?: number; awayOdds?: number; correctScoreOdds?: Record<string, number> },
   ) {
     const teamAWinOdds = overrides?.homeOdds ?? parseFloat((1.5 + (teamBStrength / teamAStrength) * 0.5).toFixed(2));
     const drawOdds    = overrides?.drawOdds ?? 3.20;
@@ -637,6 +649,15 @@ export class SimulationEngine {
       // Cards
       { ...base, market_type: 'cards',              selection: 'over_3.5',      odds_value: 1.90 },
       { ...base, market_type: 'cards',              selection: 'under_3.5',     odds_value: 1.90 },
+      // Correct score (inserted only when admin provides custom odds for this market)
+      ...(overrides?.correctScoreOdds !== undefined
+        ? Object.entries({ ...DEFAULT_CORRECT_SCORE_ODDS, ...overrides.correctScoreOdds }).map(([score, odds]) => ({
+            ...base,
+            market_type: 'correct_score',
+            selection: score,
+            odds_value: odds,
+          }))
+        : []),
     ], { onConflict: 'event_id,market_type,selection' });
   }
 
@@ -776,6 +797,12 @@ export class SimulationEngine {
         } else if (sel.market_type === 'cards') {
           if (sel.selection === 'over_3.5') won = totalCards > 3.5;
           else if (sel.selection === 'under_3.5') won = totalCards <= 3.5;
+        } else if (sel.market_type === 'correct_score') {
+          if (sel.selection === 'other') {
+            won = !STANDARD_CORRECT_SCORES.includes(finalScore);
+          } else {
+            won = sel.selection === finalScore;
+          }
         }
         await supabase.from('bet_selections').update({ status: won ? 'won' : 'lost' }).eq('id', sel.id);
       }
