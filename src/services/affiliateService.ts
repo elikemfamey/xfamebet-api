@@ -46,9 +46,18 @@ export class AffiliateService {
         withdrawal_balance: aff.withdrawal_balance + commission,
       })
       .eq('id', referral.affiliate_id);
+
+    await supabase.from('affiliate_commission_logs').insert({
+      affiliate_id: referral.affiliate_id,
+      referred_user_id: userId,
+      event_type: 'bet_rev_share',
+      commission_amount: commission,
+      source_amount: stake,
+      source_currency: 'GHS',
+    });
   }
 
-  static async creditCpaCommission(userId: string, depositAmount: number): Promise<void> {
+  static async creditCpaCommission(userId: string, depositAmount: number, depositCurrency = 'GHS'): Promise<void> {
     const { data: referral } = await supabase
       .from('affiliate_referrals')
       .select('id, affiliate_id, deposit_total, commission_earned')
@@ -69,21 +78,23 @@ export class AffiliateService {
     const isFirstDeposit = referral.deposit_total === 0 && depositAmount >= 60;
 
     let commission = 0;
+    let eventType = '';
 
     if (aff.commission_type === 'revenue_share') {
-      // Earn commission_rate % of every deposit
       commission = depositAmount * aff.commission_rate;
+      eventType = 'deposit_rev_share';
     } else if (aff.commission_type === 'cpa') {
-      // Fixed amount on first qualifying deposit only
       if (isFirstDeposit) {
         commission = aff.cpa_amount ?? 0;
+        eventType = 'deposit_cpa';
       }
     } else if (aff.commission_type === 'hybrid') {
-      // CPA on first deposit + revenue_share % on every deposit
       if (isFirstDeposit) {
         commission = (aff.cpa_amount ?? 0) + depositAmount * aff.commission_rate;
+        eventType = 'deposit_hybrid';
       } else {
         commission = depositAmount * aff.commission_rate;
+        eventType = 'deposit_rev_share';
       }
     }
 
@@ -103,6 +114,15 @@ export class AffiliateService {
           withdrawal_balance: aff.withdrawal_balance + commission,
         })
         .eq('id', referral.affiliate_id);
+
+      await supabase.from('affiliate_commission_logs').insert({
+        affiliate_id: referral.affiliate_id,
+        referred_user_id: userId,
+        event_type: eventType,
+        commission_amount: commission,
+        source_amount: depositAmount,
+        source_currency: depositCurrency,
+      });
     }
   }
 }

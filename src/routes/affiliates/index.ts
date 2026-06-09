@@ -97,14 +97,23 @@ router.get('/earnings', requireAffiliate, async (req, res) => {
   const limit = 20;
   const offset = (page - 1) * limit;
 
-  const { data, count } = await supabase
-    .from('affiliate_referrals')
-    .select('*, users(username, email)', { count: 'exact' })
+  const { data: logs, count } = await supabase
+    .from('affiliate_commission_logs')
+    .select('*, users!affiliate_commission_logs_referred_user_id_fkey(username)', { count: 'exact' })
     .eq('affiliate_id', affiliate.id)
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
-  return sendPaginated(res, data ?? [], count ?? 0, page, limit);
+  // Fallback: if FK join fails, enrich manually
+  let enriched = logs ?? [];
+  if (enriched.length > 0 && !(enriched[0] as Record<string, unknown>).users) {
+    const userIds = [...new Set(enriched.map((l: Record<string, unknown>) => l.referred_user_id as string))];
+    const { data: users } = await supabase.from('users').select('id, username').in('id', userIds);
+    const userMap = Object.fromEntries((users ?? []).map((u: Record<string, unknown>) => [u.id, u]));
+    enriched = enriched.map((l: Record<string, unknown>) => ({ ...l, users: userMap[l.referred_user_id as string] ?? null }));
+  }
+
+  return sendPaginated(res, enriched, count ?? 0, page, limit);
 });
 
 // GET /affiliates/referrals
@@ -159,6 +168,9 @@ router.post('/withdraw', requireAffiliate, validateBody(withdrawSchema), async (
   if (!affiliate) return sendError(res, 'Affiliate not found', 404);
   if (affiliate.withdrawal_balance < amount) return sendError(res, 'Insufficient affiliate earnings', 400);
 
+  const { data: wallet } = await supabase.from('wallets').select('id').eq('user_id', req.user!.id).single();
+  if (!wallet) return sendError(res, 'Wallet not found', 404);
+
   await supabase.from('withdrawal_requests').insert({
     user_id: req.user!.id,
     amount,
@@ -174,7 +186,7 @@ router.post('/withdraw', requireAffiliate, validateBody(withdrawSchema), async (
 
   await supabase.from('transactions').insert({
     user_id: req.user!.id,
-    wallet_id: (await supabase.from('wallets').select('id').eq('user_id', req.user!.id).single()).data?.id,
+    wallet_id: wallet.id,
     type: 'affiliate_commission',
     amount: -amount,
     currency: 'GHS',
