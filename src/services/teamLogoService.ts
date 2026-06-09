@@ -7,7 +7,7 @@ const REDIS_TTL_HIT  = 3600; // 1 hour for found logos
 const REDIS_TTL_MISS = 300;  // 5 min for not-found (avoids hammering external APIs)
 const REDIS_PREFIX   = 'team_logo:';
 
-export type LogoSource = 'api_football' | 'thesportsdb' | 'manual';
+export type LogoSource = 'api_football' | 'sportmonks' | 'thesportsdb' | 'manual';
 
 export interface TeamLogoResult {
   team_name: string;
@@ -126,11 +126,12 @@ export async function resolveTeamLogo(
  * Call without await — this is intentionally fire-and-forget.
  */
 export function persistFixtureLogos(
-  fixtures: Array<{ teamName: string; logoUrl: string | null }>,
+  fixtures: Array<{ teamName: string; logoUrl: string | null; source?: LogoSource }>,
+  defaultSource: LogoSource = 'api_football',
 ): void {
-  for (const { teamName, logoUrl } of fixtures) {
+  for (const { teamName, logoUrl, source } of fixtures) {
     if (teamName && logoUrl) {
-      dbUpsert(teamName, logoUrl, 'api_football').catch(() => {});
+      dbUpsert(teamName, logoUrl, source ?? defaultSource).catch(() => {});
     }
   }
 }

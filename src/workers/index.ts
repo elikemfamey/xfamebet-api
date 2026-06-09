@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { supabase } from '../config/supabase';
 import { ingestAllOdds, getActiveSports } from '../services/oddsIngestionService';
-import { fetchAndCacheLiveScores } from '../services/liveScoreService';
+import { fetchAndCacheLiveScores } from '../services/sportmonksLiveScoreService';
 import { fetchAllSportsScores } from '../services/oddsApiScoreService';
 import { settlePendingBets } from '../services/betSettlementService';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';

@@ -43,6 +43,7 @@ export const env = {
 
   ODDS_API_KEY: process.env.ODDS_API_KEY || '',
   API_FOOTBALL_KEY: process.env.API_FOOTBALL_KEY || '',
+  SPORTMONKS_API_TOKEN: process.env.SPORTMONKS_API_TOKEN || '',
 
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
   RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10),

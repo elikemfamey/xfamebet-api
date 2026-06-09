@@ -219,7 +219,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
         odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
         oddsLocked: homeOdds == null,
         markets,
-        sportKey: 'api-football',
+        sportKey: 'sportmonks',
         kickedOffAt: null,
       });
     }
