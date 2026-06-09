@@ -29,7 +29,7 @@ router.get('/', async (req, res) => {
     .from('odds_feed')
     .select('*', { count: 'exact' })
     .eq('status', 'active')
-    .order('updated_at', { ascending: false })
+    .order('starts_at', { ascending: true, nullsFirst: false })
     .range(offset, offset + limit - 1);
 
   if (sport) query = query.eq('sport', sport);
@@ -54,7 +54,7 @@ router.get('/live', async (req, res) => {
     .eq('status', 'active')
     .lte('starts_at', new Date().toISOString())
     .not('sport', 'ilike', 'virtual_%')
-    .order('updated_at', { ascending: false })
+    .order('starts_at', { ascending: true, nullsFirst: false })
     .limit(100);
 
   if (sport) query = query.eq('sport', sport);
