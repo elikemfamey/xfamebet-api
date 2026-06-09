@@ -174,7 +174,7 @@ router.post('/withdraw', requireAffiliate, validateBody(withdrawSchema), async (
   await supabase.from('withdrawal_requests').insert({
     user_id: req.user!.id,
     amount,
-    currency: 'GHS',
+    currency: 'USD',
     payment_provider,
     account_details: { ...account_details, type: 'affiliate_earnings' },
     status: 'pending',
@@ -189,7 +189,7 @@ router.post('/withdraw', requireAffiliate, validateBody(withdrawSchema), async (
     wallet_id: wallet.id,
     type: 'affiliate_commission',
     amount: -amount,
-    currency: 'GHS',
+    currency: 'USD',
     status: 'pending',
     description: 'Affiliate commission withdrawal',
   });

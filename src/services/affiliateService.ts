@@ -53,11 +53,11 @@ export class AffiliateService {
       event_type: 'bet_rev_share',
       commission_amount: commission,
       source_amount: stake,
-      source_currency: 'GHS',
+      source_currency: 'USD',
     });
   }
 
-  static async creditCpaCommission(userId: string, depositAmount: number, depositCurrency = 'GHS'): Promise<void> {
+  static async creditCpaCommission(userId: string, depositAmount: number, depositCurrency = 'USD'): Promise<void> {
     const { data: referral } = await supabase
       .from('affiliate_referrals')
       .select('id, affiliate_id, deposit_total, commission_earned')

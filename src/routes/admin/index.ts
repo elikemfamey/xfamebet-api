@@ -230,6 +230,58 @@ router.get('/revenue', async (req, res) => {
   });
 });
 
+// GET /admin/affiliates/stats
+router.get('/affiliates/stats', async (_req, res) => {
+  const [
+    { data: affRows },
+    { data: refRows },
+    { count: totalReferred },
+    { data: topRows },
+  ] = await Promise.all([
+    // Aggregate per-status counts and monetary totals from affiliates table
+    supabase.from('affiliates').select('approval_status, total_earnings, withdrawal_balance'),
+    // Aggregate deposit and betting volume from referrals
+    supabase.from('affiliate_referrals').select('deposit_total, betting_volume'),
+    // Total unique referred users
+    supabase.from('affiliate_referrals').select('id', { count: 'exact' }),
+    // Top 5 affiliates by total earnings
+    supabase.from('affiliates')
+      .select('id, total_earnings, withdrawal_balance, commission_type, commission_rate, users(username)')
+      .eq('approval_status', 'approved')
+      .order('total_earnings', { ascending: false })
+      .limit(5),
+  ]);
+
+  const approved = (affRows ?? []).filter(a => a.approval_status === 'approved').length;
+  const pending = (affRows ?? []).filter(a => a.approval_status === 'pending').length;
+  const blocked = (affRows ?? []).filter(a => a.approval_status === 'blocked').length;
+  const totalCommissionsEarned = (affRows ?? []).reduce((s, a) => s + (a.total_earnings ?? 0), 0);
+  const totalCommissionsOwed = (affRows ?? []).reduce((s, a) => s + (a.withdrawal_balance ?? 0), 0);
+  const totalCommissionsPaid = totalCommissionsEarned - totalCommissionsOwed;
+  const totalAffiliateDeposits = (refRows ?? []).reduce((s, r) => s + (r.deposit_total ?? 0), 0);
+  const totalAffiliateBetVolume = (refRows ?? []).reduce((s, r) => s + (r.betting_volume ?? 0), 0);
+
+  return sendSuccess(res, {
+    counts: { approved, pending, blocked, total: (affRows ?? []).length },
+    financials: {
+      total_commissions_earned: totalCommissionsEarned,
+      total_commissions_owed: totalCommissionsOwed,
+      total_commissions_paid: totalCommissionsPaid,
+      total_affiliate_deposits: totalAffiliateDeposits,
+      total_affiliate_bet_volume: totalAffiliateBetVolume,
+      total_referred_users: totalReferred ?? 0,
+    },
+    top_affiliates: (topRows ?? []).map(a => ({
+      id: a.id,
+      username: (a.users as Record<string, unknown>)?.username ?? 'Unknown',
+      total_earnings: a.total_earnings,
+      withdrawal_balance: a.withdrawal_balance,
+      commission_type: a.commission_type,
+      commission_rate: a.commission_rate,
+    })),
+  });
+});
+
 // GET /admin/affiliates
 router.get('/affiliates', async (req, res) => {
   const page = parseInt(req.query.page as string) || 1;
