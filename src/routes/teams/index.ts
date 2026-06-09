@@ -1,9 +1,12 @@
 import { Router } from 'express';
 import { resolveTeamLogo } from '../../services/teamLogoService';
+import { teamLogoLimiter } from '../../middleware/rateLimiter';
 import { sendSuccess, sendError } from '../../utils/response';
 import { logger } from '../../utils/logger';
 
 const router = Router();
+
+router.use(teamLogoLimiter);
 
 // GET /api/team-logo/:teamName?sport=football|tennis|basketball…
 // Returns { team_name, logo_url, source } — logo_url is null when not found.

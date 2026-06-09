@@ -38,3 +38,13 @@ export const paymentLimiter = rateLimit({
   legacyHeaders: false,
   handler,
 });
+
+// Team logo lookups are read-only and cached server-side; allow a higher burst
+// so page loads showing many teams don't get throttled.
+export const teamLogoLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler,
+});
