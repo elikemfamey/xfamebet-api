@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabase';
-import { getIO, broadcastBetWon, broadcastWalletUpdate } from '../socket';
+import { getIO, broadcastBetWon, broadcastWalletUpdate, broadcastOddsUpdate } from '../socket';
+import { redis } from '../config/redis';
 import { WalletService } from './walletService';
 import { logger } from '../utils/logger';
 
@@ -423,8 +424,10 @@ export class SimulationEngine {
     }
 
     try {
-      const io = getIO();
-      io.emit('odds:update', { eventId: `sim:${state.id}`, updates });
+      broadcastOddsUpdate(`sim:${state.id}`, updates);
+      // Bust live feed cache so the frontend gets fresh scores on next reload
+      redis.del('live_feed:').catch(() => {});
+      redis.del(`live_feed:${state.sport}`).catch(() => {});
     } catch {}
   }
 

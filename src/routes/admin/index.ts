@@ -273,7 +273,7 @@ router.get('/affiliates/stats', async (_req, res) => {
     },
     top_affiliates: (topRows ?? []).map(a => ({
       id: a.id,
-      username: (a.users as Record<string, unknown>)?.username ?? 'Unknown',
+      username: (a.users as unknown as { username: string }[])?.[0]?.username ?? 'Unknown',
       total_earnings: a.total_earnings,
       withdrawal_balance: a.withdrawal_balance,
       commission_type: a.commission_type,

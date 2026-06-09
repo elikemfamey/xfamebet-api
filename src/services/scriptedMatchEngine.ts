@@ -1,5 +1,6 @@
 import { supabase } from '../config/supabase';
-import { getIO } from '../socket';
+import { getIO, broadcastOddsUpdate } from '../socket';
+import { redis } from '../config/redis';
 import { logger } from '../utils/logger';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -159,15 +160,14 @@ async function pushLiveOdds(state: MatchState) {
   ], { onConflict: 'event_id,market_type,selection' });
 
   try {
-    const io = getIO();
-    io.emit('odds:update', {
-      eventId: `sim:${state.id}`,
-      updates: [
-        { selection: 'home', odds_value: +home.toFixed(2) },
-        { selection: 'draw', odds_value: +draw.toFixed(2) },
-        { selection: 'away', odds_value: +away.toFixed(2) },
-      ],
-    });
+    broadcastOddsUpdate(`sim:${state.id}`, [
+      { selection: 'home', odds_value: +home.toFixed(2) },
+      { selection: 'draw', odds_value: +draw.toFixed(2) },
+      { selection: 'away', odds_value: +away.toFixed(2) },
+    ]);
+    // Bust live feed cache so the frontend gets fresh scores on next reload
+    redis.del('live_feed:').catch(() => {});
+    redis.del(`live_feed:${state.sport}`).catch(() => {});
   } catch {}
 }
 

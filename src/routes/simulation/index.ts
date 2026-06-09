@@ -1,11 +1,20 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { supabase } from '../../config/supabase';
+import { redis } from '../../config/redis';
 import { authenticate, requireAdmin } from '../../middleware/auth';
 import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { SimulationEngine } from '../../services/simulationEngine';
 import { ScriptedMatchEngine } from '../../services/scriptedMatchEngine';
+import { getIO } from '../../socket';
+
+async function bustLiveFeedCache(sport?: string) {
+  await Promise.all([
+    redis.del('live_feed:'),
+    sport ? redis.del(`live_feed:${sport}`) : Promise.resolve(),
+  ]);
+}
 
 const router = Router();
 
@@ -289,6 +298,12 @@ router.post('/admin/:id/start', authenticate, requireAdmin, async (req, res) => 
     SimulationEngine.startMatch(id);
   }
 
+  // Notify all connected clients that a match went live and bust the cached feed
+  try {
+    getIO().emit('simulation:live', { matchId: id, status: 'live', sport: match.sport });
+  } catch {}
+  await bustLiveFeedCache(match.sport);
+
   return sendSuccess(res, { message: 'Match started' });
 });
 
@@ -331,9 +346,17 @@ router.post('/admin/:id/stop', authenticate, requireAdmin, async (req, res) => {
   if ((match as any)?.is_scripted) ScriptedMatchEngine.stopMatch(id);
   else SimulationEngine.stopMatch(id);
 
-  await supabase.from('simulated_matches')
+  const { data: stoppedMatch } = await supabase.from('simulated_matches')
     .update({ status: 'cancelled', ended_at: new Date().toISOString() })
-    .eq('id', id);
+    .eq('id', id)
+    .select('sport')
+    .single();
+
+  try {
+    getIO().emit('simulation:live', { matchId: id, status: 'cancelled' });
+  } catch {}
+  await bustLiveFeedCache(stoppedMatch?.sport);
+
   return sendSuccess(res, { message: 'Match stopped' });
 });
 
@@ -344,7 +367,7 @@ router.post('/admin/:id/edit-score', authenticate, requireAdmin, validateBody(z.
   away_score: z.number().int().min(0),
 })), async (req, res) => {
   const { id } = req.params;
-  const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
+  const { data: match } = await supabase.from('simulated_matches').select('is_scripted, sport').eq('id', id).single();
 
   const isScripted = (match as any)?.is_scripted;
   if (isScripted) ScriptedMatchEngine.overrideScore(id, req.body.home_score, req.body.away_score);
@@ -357,6 +380,8 @@ router.post('/admin/:id/edit-score', authenticate, requireAdmin, validateBody(z.
   // Immediately push updated score to all connected clients
   if (isScripted) ScriptedMatchEngine.broadcastState(id);
   else SimulationEngine.broadcastState(id);
+
+  await bustLiveFeedCache(match?.sport);
 
   return sendSuccess(res, { message: 'Score updated' });
 });

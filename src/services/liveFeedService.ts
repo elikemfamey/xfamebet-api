@@ -100,7 +100,6 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     supabase
       .from('simulated_matches')
       .select('id, team_a, team_b, team_a_score, team_b_score, current_minute, sport, competition, league_name, home_logo, away_logo, started_at')
-      .eq('is_scripted', true)
       .eq('status', 'live'),
   ]);
 
