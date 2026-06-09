@@ -1,6 +1,6 @@
 import { supabase } from '../config/supabase';
 import { getIO, broadcastBetWon, broadcastWalletUpdate, broadcastOddsUpdate } from '../socket';
-import { redis } from '../config/redis';
+import { redis, REDIS_KEYS } from '../config/redis';
 import { WalletService } from './walletService';
 import { logger } from '../utils/logger';
 
@@ -217,6 +217,15 @@ export class SimulationEngine {
 
     await supabase.from('odds_feed').update({ status: 'settled' })
       .eq('event_id', `sim:${matchId}`).eq('source', 'simulation');
+
+    // Remove from sportsbook and live feed caches so the match disappears immediately
+    await Promise.all([
+      redis.del(REDIS_KEYS.ALL_ODDS),
+      redis.del(REDIS_KEYS.LIVE_ODDS(`sim:${matchId}`)),
+      redis.del('live_feed:'),
+      redis.del(`live_feed:${state.sport}`),
+    ]);
+    try { getIO().emit('simulation:completed', { matchId, result, scoreA: state.scoreA, scoreB: state.scoreB }); } catch {}
 
     await SimulationEngine.settleBets(matchId, result, state.scoreA, state.scoreB);
     matchStates.delete(matchId);
