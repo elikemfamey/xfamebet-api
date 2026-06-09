@@ -1,6 +1,7 @@
 import { supabase } from '../config/supabase';
 import { getCachedLiveScores, LiveScore } from './liveScoreService';
 import { getAllCachedOddsApiScores, OddsApiScoreEntry } from './oddsApiScoreService';
+import { logger } from '../utils/logger';
 
 export interface LiveFeedTeam {
   name: string;
@@ -119,6 +120,8 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
   const result: LiveFeedMatch[] = [];
   const processedEventIds = new Set<string>();
 
+  logger.debug(`[LiveFeed] Building feed — sportmonks/apifb scores: ${apiFbScores.length}, oddsApi events: ${oddsApiScores.size}, odds_feed rows: ${allOdds.length}, scripted: ${scriptedResult.data?.length ?? 0}`);
+
   // ── Step 1: Odds API scores — live events for ALL sports ────────────────────
   // This covers basketball, tennis, baseball, MMA, etc. as well as football.
   for (const [eventId, scoreData] of oddsApiScores) {
@@ -178,6 +181,8 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     });
   }
 
+  logger.debug(`[LiveFeed] Step 1 (OddsAPI) added ${result.length} matches`);
+
   // ── Step 2: API-Football live football matches not already covered ───────────
   // Useful for football games that kicked off but whose Odds API score isn't cached yet.
   if (!sport || sport === 'football') {
@@ -225,6 +230,8 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     }
   }
 
+  logger.debug(`[LiveFeed] Step 2 (Sportmonks) total now ${result.length} matches`);
+
   // ── Step 3: Scripted live matches ────────────────────────────────────────────
   for (const match of scriptedResult.data ?? []) {
     const scriptEventId = `sim:${match.id}`;
@@ -254,6 +261,8 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       kickedOffAt: match.started_at ?? null,
     });
   }
+
+  logger.debug(`[LiveFeed] Step 3 (scripted) total now ${result.length} matches`);
 
   // ── Step 4: Fallback — odds_feed events past their start time with no score data ─
   // These are games where Odds API hasn't provided scores yet but the game has started.
@@ -294,6 +303,8 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       kickedOffAt: first.starts_at,
     });
   }
+
+  logger.debug(`[LiveFeed] Step 4 (fallback) total now ${result.length} matches`);
 
   // Sort: events with actual scores first, then those with odds, then locked
   result.sort((a, b) => {

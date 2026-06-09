@@ -86,6 +86,24 @@ router.get('/scores/live', async (req, res) => {
   return sendSuccess(res, scores);
 });
 
+// GET /matches/debug/feed-state - inspect what each pipeline stage has (dev only)
+router.get('/debug/feed-state', async (req, res) => {
+  const { getAllCachedOddsApiScores } = await import('../../services/oddsApiScoreService');
+  const [smScores, oddsApiScores, oddsResult] = await Promise.all([
+    getCachedLiveScores(),
+    getAllCachedOddsApiScores(),
+    supabase.from('odds_feed').select('event_id, event_name, sport, status, starts_at').in('status', ['active', 'suspended']).limit(20),
+  ]);
+  return sendSuccess(res, {
+    sportmonks_cached: smScores.length,
+    sportmonks_matches: smScores,
+    odds_api_events: oddsApiScores.size,
+    odds_api_with_scores: Array.from(oddsApiScores.values()).filter(e => e.scores).length,
+    odds_feed_rows: oddsResult.data?.length ?? 0,
+    odds_feed_sample: oddsResult.data ?? [],
+  });
+});
+
 // GET /matches/:eventId/odds - all markets for an event
 router.get('/:eventId/odds', async (req, res) => {
   const cached = await redis.get(REDIS_KEYS.LIVE_ODDS(req.params.eventId));
