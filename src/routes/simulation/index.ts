@@ -55,6 +55,34 @@ router.get('/scheduled', async (_req, res) => {
   return sendSuccess(res, (data ?? []).map(redact));
 });
 
+// GET /simulation/featured — live + upcoming non-virtual simulation matches for the home page
+router.get('/featured', async (_req, res) => {
+  const { data: matches } = await supabase
+    .from('simulated_matches')
+    .select('id, team_a, team_b, sport, league_name, competition, scheduled_at, started_at, status, team_a_score, team_b_score, current_minute, home_logo, away_logo')
+    .in('status', ['live', 'scheduled'])
+    .not('sport', 'ilike', 'virtual_%')
+    .limit(9);
+
+  if (!matches?.length) return sendSuccess(res, { matches: [], odds: [] });
+
+  const eventIds = matches.map((m: any) => `sim:${m.id}`);
+  const { data: odds } = await supabase
+    .from('odds_feed')
+    .select('id, event_id, event_name, market_type, selection, odds_value, sport, league, starts_at, status')
+    .in('event_id', eventIds)
+    .in('status', ['active', 'suspended']);
+
+  // live first, then soonest scheduled
+  const sorted = [...matches].sort((a: any, b: any) => {
+    if (a.status === 'live' && b.status !== 'live') return -1;
+    if (b.status === 'live' && a.status !== 'live') return 1;
+    return (new Date(a.scheduled_at ?? 0).getTime()) - (new Date(b.scheduled_at ?? 0).getTime());
+  });
+
+  return sendSuccess(res, { matches: sorted, odds: odds ?? [] });
+});
+
 // GET /simulation/:id
 router.get('/:id', async (req, res) => {
   const { data } = await supabase.from('simulated_matches')
