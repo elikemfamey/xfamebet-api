@@ -59,34 +59,33 @@ export class AffiliateService {
 
     const { data: aff } = await supabase
       .from('affiliates')
-      .select('commission_type, cpa_amount, approval_status, total_earnings, withdrawal_balance')
+      .select('commission_type, cpa_amount, commission_rate, approval_status, total_earnings, withdrawal_balance')
       .eq('id', referral.affiliate_id)
       .single();
 
     if (!aff || aff.approval_status !== 'approved') return;
 
     const newDepositTotal = referral.deposit_total + depositAmount;
+    const isFirstDeposit = referral.deposit_total === 0 && depositAmount >= 60;
 
-    // Revenue share affiliates: track deposit volume but no CPA commission
-    if (aff.commission_type !== 'cpa' && aff.commission_type !== 'hybrid') {
-      await supabase
-        .from('affiliate_referrals')
-        .update({ deposit_total: newDepositTotal })
-        .eq('id', referral.id);
-      return;
+    let commission = 0;
+
+    if (aff.commission_type === 'revenue_share') {
+      // Earn commission_rate % of every deposit
+      commission = depositAmount * aff.commission_rate;
+    } else if (aff.commission_type === 'cpa') {
+      // Fixed amount on first qualifying deposit only
+      if (isFirstDeposit) {
+        commission = aff.cpa_amount ?? 0;
+      }
+    } else if (aff.commission_type === 'hybrid') {
+      // CPA on first deposit + revenue_share % on every deposit
+      if (isFirstDeposit) {
+        commission = (aff.cpa_amount ?? 0) + depositAmount * aff.commission_rate;
+      } else {
+        commission = depositAmount * aff.commission_rate;
+      }
     }
-
-    // CPA/hybrid: only pay commission on the first qualifying deposit
-    const isFirstDeposit = referral.deposit_total === 0 && depositAmount >= 10;
-    if (!isFirstDeposit) {
-      await supabase
-        .from('affiliate_referrals')
-        .update({ deposit_total: newDepositTotal })
-        .eq('id', referral.id);
-      return;
-    }
-
-    const commission = aff.cpa_amount ?? 0;
 
     await supabase
       .from('affiliate_referrals')
