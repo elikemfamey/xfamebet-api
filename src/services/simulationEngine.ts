@@ -25,6 +25,15 @@ interface MatchState {
   yellowCards: { a: string[]; b: string[] };
   redCards: { a: string[]; b: string[] };
   momentum: number[];
+  // Phase tracking for halftime / injury time
+  phase: 'first_half' | 'halftime_extra' | 'halftime_break' | 'second_half' | 'fulltime_extra';
+  extraTimeMinute: number;
+  htExtraTotal: number;
+  htBreakTicksLeft: number;
+  ftExtraTotal: number;
+  halftimeScoreA: number;
+  halftimeScoreB: number;
+  firstScorerTeam: 'a' | 'b' | null;
 }
 
 const activeMatches = new Map<string, NodeJS.Timeout>();
@@ -84,7 +93,6 @@ export class SimulationEngine {
     const { data: match } = await supabase.from('simulated_matches').select('*').eq('id', matchId).single();
     if (!match) return;
 
-    const players = PLAYER_NAMES.football;
     const state: MatchState = {
       id: matchId,
       teamA: match.team_a,
@@ -106,71 +114,130 @@ export class SimulationEngine {
       yellowCards: { a: [], b: [] },
       redCards: { a: [], b: [] },
       momentum: [0],
+      phase: 'first_half',
+      extraTimeMinute: 0,
+      htExtraTotal: Math.floor(Math.random() * 2) + 1,
+      htBreakTicksLeft: 15,
+      ftExtraTotal: Math.floor(Math.random() * 9) + 1,
+      halftimeScoreA: 0,
+      halftimeScoreB: 0,
+      firstScorerTeam: null,
     };
 
     matchStates.set(matchId, state);
-
-    // Emit kickoff
     await SimulationEngine.emitEvent(state, 0, 'kickoff', '', '', pickRandom(COMMENTARY_TEMPLATES.kickoff));
 
-    // Run simulation: one tick per minute
     const interval = setInterval(async () => {
-      const currentState = matchStates.get(matchId);
-      if (!currentState) { clearInterval(interval); return; }
+      const s = matchStates.get(matchId);
+      if (!s) { clearInterval(interval); return; }
 
-      currentState.minute++;
-
-      // Update live odds based on current state
-      await SimulationEngine.updateLiveOdds(currentState);
-
-      // Generate events
-      await SimulationEngine.processMinute(currentState);
-
-      // Check halftime
-      if (currentState.minute === Math.floor(currentState.duration / 2)) {
-        await SimulationEngine.emitEvent(currentState, currentState.minute, 'halftime', '', '', pickRandom(COMMENTARY_TEMPLATES.halftime));
-        await supabase.from('simulated_matches').update({
-          current_minute: currentState.minute,
-          team_a_score: currentState.scoreA,
-          team_b_score: currentState.scoreB,
-        }).eq('id', matchId);
+      // ── Halftime break: hold at HT status ──────────────────────────────────
+      if (s.phase === 'halftime_break') {
+        s.htBreakTicksLeft--;
+        if (s.htBreakTicksLeft <= 0) {
+          s.phase = 'second_half';
+          s.extraTimeMinute = 0;
+          await SimulationEngine.emitEvent(s, s.minute + 1, 'kickoff', '', '', 'The second half is underway!');
+        }
+        SimulationEngine.broadcastMatchState(s, 'HT');
+        return;
       }
 
-      // Check end of match
-      if (currentState.minute >= currentState.duration) {
-        clearInterval(interval);
-        activeMatches.delete(matchId);
-
-        const result = currentState.scoreA > currentState.scoreB ? 'team_a'
-          : currentState.scoreB > currentState.scoreA ? 'team_b' : 'draw';
-
-        await supabase.from('simulated_matches').update({
-          status: 'completed',
-          result,
-          team_a_score: currentState.scoreA,
-          team_b_score: currentState.scoreB,
-          current_minute: currentState.duration,
-          ended_at: new Date().toISOString(),
-        }).eq('id', matchId);
-
-        await SimulationEngine.emitEvent(currentState, currentState.duration, 'fulltime', '', '',
-          pickRandom(COMMENTARY_TEMPLATES.fulltime));
-
-        // Mark odds as settled so they leave the live/sportsbook feed
-        await supabase.from('odds_feed')
-          .update({ status: 'settled' })
-          .eq('event_id', `sim:${matchId}`)
-          .eq('source', 'simulation');
-
-        // Settle bets
-        await SimulationEngine.settleBets(matchId, result, currentState.scoreA, currentState.scoreB);
-
-        matchStates.delete(matchId);
-        logger.info(`Match ${matchId} completed: ${currentState.scoreA}-${currentState.scoreB}`);
+      // ── Halftime extra time: show 45+1, 45+2 … ────────────────────────────
+      if (s.phase === 'halftime_extra') {
+        s.extraTimeMinute++;
+        await SimulationEngine.updateLiveOdds(s);
+        await SimulationEngine.processMinute(s);
+        SimulationEngine.broadcastMatchState(s, `45+${s.extraTimeMinute}`);
+        await supabase.from('simulated_matches').update({ current_minute: 45, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
+        if (s.extraTimeMinute >= s.htExtraTotal) {
+          s.phase = 'halftime_break';
+          s.halftimeScoreA = s.scoreA;
+          s.halftimeScoreB = s.scoreB;
+          await SimulationEngine.emitEvent(s, 45, 'halftime', '', '', pickRandom(COMMENTARY_TEMPLATES.halftime));
+        }
+        return;
       }
-    }, 60_000); // 1 real minute per game minute
+
+      // ── Fulltime extra time: show 90+1 … 90+N ─────────────────────────────
+      if (s.phase === 'fulltime_extra') {
+        s.extraTimeMinute++;
+        await SimulationEngine.updateLiveOdds(s);
+        await SimulationEngine.processMinute(s);
+        SimulationEngine.broadcastMatchState(s, `90+${s.extraTimeMinute}`);
+        await supabase.from('simulated_matches').update({ current_minute: 90, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
+        if (s.extraTimeMinute >= s.ftExtraTotal) {
+          clearInterval(interval);
+          activeMatches.delete(matchId);
+          await SimulationEngine.handleFulltime(matchId, s);
+        }
+        return;
+      }
+
+      // ── Normal minute tick ─────────────────────────────────────────────────
+      s.minute++;
+      await SimulationEngine.updateLiveOdds(s);
+      await SimulationEngine.processMinute(s);
+      SimulationEngine.broadcastMatchState(s, `${s.minute}'`);
+
+      await supabase.from('simulated_matches').update({
+        current_minute: s.minute,
+        team_a_score: s.scoreA,
+        team_b_score: s.scoreB,
+      }).eq('id', matchId);
+
+      // Transition: end of first half → halftime extra time
+      if (s.minute === Math.floor(s.duration / 2) && s.phase === 'first_half') {
+        s.phase = 'halftime_extra';
+        s.extraTimeMinute = 0;
+      }
+
+      // Transition: end of second half → fulltime extra time
+      if (s.minute >= s.duration && s.phase === 'second_half') {
+        s.phase = 'fulltime_extra';
+        s.extraTimeMinute = 0;
+      }
+    }, 60_000);
 
     activeMatches.set(matchId, interval);
+  }
+
+  private static async handleFulltime(matchId: string, state: MatchState) {
+    const result = state.scoreA > state.scoreB ? 'team_a'
+      : state.scoreB > state.scoreA ? 'team_b' : 'draw';
+
+    await supabase.from('simulated_matches').update({
+      status: 'completed', result,
+      team_a_score: state.scoreA, team_b_score: state.scoreB,
+      current_minute: state.duration, ended_at: new Date().toISOString(),
+    }).eq('id', matchId);
+
+    await SimulationEngine.emitEvent(state, state.duration, 'fulltime', '', '',
+      pickRandom(COMMENTARY_TEMPLATES.fulltime));
+
+    await supabase.from('odds_feed').update({ status: 'settled' })
+      .eq('event_id', `sim:${matchId}`).eq('source', 'simulation');
+
+    await SimulationEngine.settleBets(matchId, result, state.scoreA, state.scoreB);
+    matchStates.delete(matchId);
+    logger.info(`Match ${matchId} completed: ${state.scoreA}-${state.scoreB}`);
+  }
+
+  private static broadcastMatchState(state: MatchState, status: string) {
+    try {
+      const io = getIO();
+      io.to(`match:${state.id}`).emit('match:state', {
+        matchId: state.id,
+        minute: state.minute,
+        extraTime: state.extraTimeMinute,
+        status,
+        scoreA: state.scoreA,
+        scoreB: state.scoreB,
+        possession: state.possession,
+        shots: state.shots,
+        fouls: state.fouls,
+      });
+    } catch {}
   }
 
   static stopMatch(matchId: string) {
@@ -194,31 +261,60 @@ export class SimulationEngine {
   static resumeMatch(matchId: string) {
     const state = matchStates.get(matchId);
     if (!state) return;
-    // Re-attach interval from current state
+    // Re-attach the same phase-aware interval
     const interval = setInterval(async () => {
-      const currentState = matchStates.get(matchId);
-      if (!currentState) { clearInterval(interval); return; }
-      currentState.minute++;
-      await SimulationEngine.updateLiveOdds(currentState);
-      await SimulationEngine.processMinute(currentState);
-      if (currentState.minute >= currentState.duration) {
-        clearInterval(interval);
-        activeMatches.delete(matchId);
-        const result = currentState.scoreA > currentState.scoreB ? 'team_a'
-          : currentState.scoreB > currentState.scoreA ? 'team_b' : 'draw';
-        await supabase.from('simulated_matches').update({
-          status: 'completed', result,
-          team_a_score: currentState.scoreA, team_b_score: currentState.scoreB,
-          current_minute: currentState.duration, ended_at: new Date().toISOString(),
-        }).eq('id', matchId);
-        await supabase.from('odds_feed')
-          .update({ status: 'settled' })
-          .eq('event_id', `sim:${matchId}`)
-          .eq('source', 'simulation');
-        await SimulationEngine.settleBets(matchId, result, currentState.scoreA, currentState.scoreB);
-        matchStates.delete(matchId);
+      const s = matchStates.get(matchId);
+      if (!s) { clearInterval(interval); return; }
+
+      if (s.phase === 'halftime_break') {
+        s.htBreakTicksLeft--;
+        if (s.htBreakTicksLeft <= 0) {
+          s.phase = 'second_half';
+          s.extraTimeMinute = 0;
+          await SimulationEngine.emitEvent(s, s.minute + 1, 'kickoff', '', '', 'The second half is underway!');
+        }
+        SimulationEngine.broadcastMatchState(s, 'HT');
+        return;
       }
-    }, 1000); // 1 second per game minute
+      if (s.phase === 'halftime_extra') {
+        s.extraTimeMinute++;
+        await SimulationEngine.updateLiveOdds(s);
+        await SimulationEngine.processMinute(s);
+        SimulationEngine.broadcastMatchState(s, `45+${s.extraTimeMinute}`);
+        await supabase.from('simulated_matches').update({ current_minute: 45, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
+        if (s.extraTimeMinute >= s.htExtraTotal) {
+          s.phase = 'halftime_break';
+          s.halftimeScoreA = s.scoreA;
+          s.halftimeScoreB = s.scoreB;
+          await SimulationEngine.emitEvent(s, 45, 'halftime', '', '', pickRandom(COMMENTARY_TEMPLATES.halftime));
+        }
+        return;
+      }
+      if (s.phase === 'fulltime_extra') {
+        s.extraTimeMinute++;
+        await SimulationEngine.updateLiveOdds(s);
+        await SimulationEngine.processMinute(s);
+        SimulationEngine.broadcastMatchState(s, `90+${s.extraTimeMinute}`);
+        await supabase.from('simulated_matches').update({ current_minute: 90, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
+        if (s.extraTimeMinute >= s.ftExtraTotal) {
+          clearInterval(interval);
+          activeMatches.delete(matchId);
+          await SimulationEngine.handleFulltime(matchId, s);
+        }
+        return;
+      }
+      s.minute++;
+      await SimulationEngine.updateLiveOdds(s);
+      await SimulationEngine.processMinute(s);
+      SimulationEngine.broadcastMatchState(s, `${s.minute}'`);
+      await supabase.from('simulated_matches').update({ current_minute: s.minute, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
+      if (s.minute === Math.floor(s.duration / 2) && s.phase === 'first_half') {
+        s.phase = 'halftime_extra'; s.extraTimeMinute = 0;
+      }
+      if (s.minute >= s.duration && s.phase === 'second_half') {
+        s.phase = 'fulltime_extra'; s.extraTimeMinute = 0;
+      }
+    }, 60_000);
     activeMatches.set(matchId, interval);
   }
 
@@ -281,6 +377,37 @@ export class SimulationEngine {
     await SimulationEngine.emitEvent(state, state.minute, eventType, player, teamName, commentary);
   }
 
+  static async applyGoalOddsShock(state: MatchState, scoringTeam: 'a' | 'b') {
+    const boost = Math.random() < 0.3 ? 5 : 2;
+    const { data: odds } = await supabase
+      .from('odds_feed').select('selection, odds_value')
+      .eq('event_id', `sim:${state.id}`).eq('market_type', 'match_winner');
+
+    const homeOdds = odds?.find(o => o.selection === 'home')?.odds_value ?? 1.90;
+    const awayOdds = odds?.find(o => o.selection === 'away')?.odds_value ?? 1.90;
+
+    const newHome = scoringTeam === 'a'
+      ? parseFloat(Math.max(1.05, homeOdds - 0.15).toFixed(2))
+      : parseFloat(Math.min(50, homeOdds + boost).toFixed(2));
+    const newAway = scoringTeam === 'b'
+      ? parseFloat(Math.max(1.05, awayOdds - 0.15).toFixed(2))
+      : parseFloat(Math.min(50, awayOdds + boost).toFixed(2));
+
+    await supabase.from('odds_feed')
+      .update({ odds_value: newHome })
+      .eq('event_id', `sim:${state.id}`).eq('market_type', 'match_winner').eq('selection', 'home');
+    await supabase.from('odds_feed')
+      .update({ odds_value: newAway })
+      .eq('event_id', `sim:${state.id}`).eq('market_type', 'match_winner').eq('selection', 'away');
+
+    broadcastOddsUpdate(`sim:${state.id}`, [
+      { selection: 'home', odds_value: newHome },
+      { selection: 'away', odds_value: newAway },
+    ]);
+    redis.del('live_feed:').catch(() => {});
+    redis.del(`live_feed:${state.sport}`).catch(() => {});
+  }
+
   static async processMinute(state: MatchState) {
     const { goalProb, cardProb } = state;
     const totalStrength = state.teamAStrength + state.teamBStrength;
@@ -297,12 +424,14 @@ export class SimulationEngine {
       if (teamAScores) state.scoreA++;
       else state.scoreB++;
       state.shots[scoringTeam]++;
+      if (state.firstScorerTeam === null) state.firstScorerTeam = scoringTeam;
 
       const scoreStr = `${state.scoreA}-${state.scoreB}`;
       const commentary = formatCommentary(pickRandom(COMMENTARY_TEMPLATES.goal), player, teamName, scoreStr);
       await SimulationEngine.emitEvent(state, state.minute, 'goal', player, teamName, commentary, {
         score_a: state.scoreA, score_b: state.scoreB,
       });
+      await SimulationEngine.applyGoalOddsShock(state, scoringTeam);
     } else if (goalRoll < goalProb * 2) {
       // Shot off target
       const teamAShots = Math.random() < teamAGoalWeight;
@@ -342,26 +471,6 @@ export class SimulationEngine {
     // Update momentum
     const momentumValue = (state.scoreA - state.scoreB) * 20 + (state.shots.a - state.shots.b) * 5;
     state.momentum.push(Math.min(100, Math.max(-100, momentumValue)));
-
-    // Broadcast state update
-    try {
-      const io = getIO();
-      io.to(`match:${state.id}`).emit('match:state', {
-        matchId: state.id,
-        minute: state.minute,
-        scoreA: state.scoreA,
-        scoreB: state.scoreB,
-        possession: state.possession,
-        shots: state.shots,
-        fouls: state.fouls,
-      });
-    } catch {}
-
-    await supabase.from('simulated_matches').update({
-      current_minute: state.minute,
-      team_a_score: state.scoreA,
-      team_b_score: state.scoreB,
-    }).eq('id', state.id);
   }
 
   static async emitEvent(
@@ -461,14 +570,64 @@ export class SimulationEngine {
       status: 'active',
     };
 
+    const htHome = parseFloat((teamAWinOdds * 0.95 + 0.5).toFixed(2));
+    const htDraw = 2.80;
+    const htAway = parseFloat((teamBWinOdds * 0.95 + 0.5).toFixed(2));
+    const ftsFavour = Math.random() < 0.5 ? 'home' : 'away';
+    const ftsHome = ftsFavour === 'home'
+      ? parseFloat((teamAWinOdds * 0.85).toFixed(2))
+      : parseFloat((teamBWinOdds * 1.15).toFixed(2));
+    const ftsAway = ftsFavour === 'away'
+      ? parseFloat((teamBWinOdds * 0.85).toFixed(2))
+      : parseFloat((teamAWinOdds * 1.15).toFixed(2));
+
     await supabase.from('odds_feed').upsert([
-      { ...base, market_type: 'match_winner', selection: 'home', odds_value: parseFloat(teamAWinOdds.toFixed(2)) },
-      { ...base, market_type: 'match_winner', selection: 'draw', odds_value: parseFloat(drawOdds.toFixed(2)) },
-      { ...base, market_type: 'match_winner', selection: 'away', odds_value: parseFloat(teamBWinOdds.toFixed(2)) },
-      { ...base, market_type: 'over_under', selection: 'over_2.5', odds_value: 1.85 },
-      { ...base, market_type: 'over_under', selection: 'under_2.5', odds_value: 1.95 },
-      { ...base, market_type: 'btts', selection: 'yes', odds_value: 1.75 },
-      { ...base, market_type: 'btts', selection: 'no', odds_value: 2.05 },
+      // Match result
+      { ...base, market_type: 'match_winner',       selection: 'home',          odds_value: parseFloat(teamAWinOdds.toFixed(2)) },
+      { ...base, market_type: 'match_winner',       selection: 'draw',          odds_value: parseFloat(drawOdds.toFixed(2)) },
+      { ...base, market_type: 'match_winner',       selection: 'away',          odds_value: parseFloat(teamBWinOdds.toFixed(2)) },
+      // Over/Under
+      { ...base, market_type: 'over_under',         selection: 'over_1.5',      odds_value: 1.30 },
+      { ...base, market_type: 'over_under',         selection: 'under_1.5',     odds_value: 3.00 },
+      { ...base, market_type: 'over_under',         selection: 'over_2.5',      odds_value: 1.85 },
+      { ...base, market_type: 'over_under',         selection: 'under_2.5',     odds_value: 1.95 },
+      { ...base, market_type: 'over_under',         selection: 'over_3.5',      odds_value: 2.50 },
+      { ...base, market_type: 'over_under',         selection: 'under_3.5',     odds_value: 1.55 },
+      // Both teams to score
+      { ...base, market_type: 'btts',               selection: 'yes',           odds_value: 1.75 },
+      { ...base, market_type: 'btts',               selection: 'no',            odds_value: 2.05 },
+      // First team to score
+      { ...base, market_type: 'first_team_to_score', selection: 'home',         odds_value: ftsHome },
+      { ...base, market_type: 'first_team_to_score', selection: 'away',         odds_value: ftsAway },
+      { ...base, market_type: 'first_team_to_score', selection: 'no_goal',      odds_value: 8.00 },
+      // Half-time result
+      { ...base, market_type: 'half_time_result',   selection: 'home',          odds_value: htHome },
+      { ...base, market_type: 'half_time_result',   selection: 'draw',          odds_value: htDraw },
+      { ...base, market_type: 'half_time_result',   selection: 'away',          odds_value: htAway },
+      // Double chance
+      { ...base, market_type: 'double_chance',      selection: 'home_or_draw',  odds_value: parseFloat(Math.max(1.10, teamAWinOdds * 0.55).toFixed(2)) },
+      { ...base, market_type: 'double_chance',      selection: 'away_or_draw',  odds_value: parseFloat(Math.max(1.10, teamBWinOdds * 0.55).toFixed(2)) },
+      { ...base, market_type: 'double_chance',      selection: 'home_or_away',  odds_value: 1.25 },
+      // Anytime scorer
+      { ...base, market_type: 'anytime_score_home', selection: 'yes',           odds_value: 1.40 },
+      { ...base, market_type: 'anytime_score_home', selection: 'no',            odds_value: 2.75 },
+      { ...base, market_type: 'anytime_score_away', selection: 'yes',           odds_value: 1.45 },
+      { ...base, market_type: 'anytime_score_away', selection: 'no',            odds_value: 2.65 },
+      // Clean sheet
+      { ...base, market_type: 'clean_sheet_home',   selection: 'yes',           odds_value: 2.30 },
+      { ...base, market_type: 'clean_sheet_home',   selection: 'no',            odds_value: 1.60 },
+      { ...base, market_type: 'clean_sheet_away',   selection: 'yes',           odds_value: 2.50 },
+      { ...base, market_type: 'clean_sheet_away',   selection: 'no',            odds_value: 1.55 },
+      // Total goals exact band
+      { ...base, market_type: 'total_goals_exact',  selection: '0_1',           odds_value: 3.20 },
+      { ...base, market_type: 'total_goals_exact',  selection: '2_3',           odds_value: 1.70 },
+      { ...base, market_type: 'total_goals_exact',  selection: '4plus',         odds_value: 3.50 },
+      // Corners
+      { ...base, market_type: 'corners',            selection: 'over_9.5',      odds_value: 1.85 },
+      { ...base, market_type: 'corners',            selection: 'under_9.5',     odds_value: 1.95 },
+      // Cards
+      { ...base, market_type: 'cards',              selection: 'over_3.5',      odds_value: 1.90 },
+      { ...base, market_type: 'cards',              selection: 'under_3.5',     odds_value: 1.90 },
     ], { onConflict: 'event_id,market_type,selection' });
   }
 
@@ -515,6 +674,40 @@ export class SimulationEngine {
   static async settleBets(matchId: string, result: string, scoreA: number, scoreB: number) {
     const eventId = `sim:${matchId}`;
     const finalScore = `${scoreA}-${scoreB}`;
+    const totalGoals = scoreA + scoreB;
+
+    // Determine first scorer from match events
+    const { data: firstGoalEvent } = await supabase
+      .from('match_events')
+      .select('team')
+      .eq('simulation_id', matchId)
+      .eq('event_type', 'goal')
+      .order('minute', { ascending: true })
+      .limit(1)
+      .single();
+    const firstScorer = firstGoalEvent?.team ?? null;
+
+    // Determine half-time score from match events (goals up to minute 45)
+    const { data: htGoals } = await supabase
+      .from('match_events')
+      .select('team')
+      .eq('simulation_id', matchId)
+      .eq('event_type', 'goal')
+      .lte('minute', 45);
+    const liveState = matchStates.get(matchId);
+    const htA = liveState?.halftimeScoreA ?? 0;
+    const htB = liveState?.halftimeScoreB ?? 0;
+    const htResult = htA > htB ? 'home' : htB > htA ? 'away' : 'draw';
+
+    // Card/corner counts from events
+    const { data: cardEvents } = await supabase
+      .from('match_events').select('event_type').eq('simulation_id', matchId)
+      .in('event_type', ['yellow_card', 'red_card']);
+    const totalCards = cardEvents?.length ?? 0;
+
+    const { data: cornerEvents } = await supabase
+      .from('match_events').select('id').eq('simulation_id', matchId).eq('event_type', 'corner');
+    const totalCorners = cornerEvents?.length ?? 0;
 
     const { data: pendingBets } = await supabase.from('bets')
       .select('id, user_id, stake, potential_payout, bet_type')
@@ -536,12 +729,44 @@ export class SimulationEngine {
                 (sel.selection === 'away' && result === 'team_b') ||
                 (sel.selection === 'draw' && result === 'draw');
         } else if (sel.market_type === 'over_under') {
-          const totalGoals = scoreA + scoreB;
-          won = (sel.selection === 'over_2.5' && totalGoals > 2.5) ||
-                (sel.selection === 'under_2.5' && totalGoals <= 2.5);
+          if (sel.selection === 'over_1.5') won = totalGoals > 1.5;
+          else if (sel.selection === 'under_1.5') won = totalGoals <= 1.5;
+          else if (sel.selection === 'over_2.5') won = totalGoals > 2.5;
+          else if (sel.selection === 'under_2.5') won = totalGoals <= 2.5;
+          else if (sel.selection === 'over_3.5') won = totalGoals > 3.5;
+          else if (sel.selection === 'under_3.5') won = totalGoals <= 3.5;
         } else if (sel.market_type === 'btts') {
           won = (sel.selection === 'yes' && scoreA > 0 && scoreB > 0) ||
                 (sel.selection === 'no' && !(scoreA > 0 && scoreB > 0));
+        } else if (sel.market_type === 'first_team_to_score') {
+          const mState = matchStates.get(matchId);
+          if (sel.selection === 'no_goal') won = totalGoals === 0;
+          else if (sel.selection === 'home') won = firstGoalEvent?.team === (mState?.teamA ?? '');
+          else if (sel.selection === 'away') won = firstGoalEvent?.team === (mState?.teamB ?? '');
+        } else if (sel.market_type === 'half_time_result') {
+          won = sel.selection === htResult;
+        } else if (sel.market_type === 'double_chance') {
+          if (sel.selection === 'home_or_draw') won = result === 'team_a' || result === 'draw';
+          else if (sel.selection === 'away_or_draw') won = result === 'team_b' || result === 'draw';
+          else if (sel.selection === 'home_or_away') won = result !== 'draw';
+        } else if (sel.market_type === 'anytime_score_home') {
+          won = sel.selection === 'yes' ? scoreA > 0 : scoreA === 0;
+        } else if (sel.market_type === 'anytime_score_away') {
+          won = sel.selection === 'yes' ? scoreB > 0 : scoreB === 0;
+        } else if (sel.market_type === 'clean_sheet_home') {
+          won = sel.selection === 'yes' ? scoreB === 0 : scoreB > 0;
+        } else if (sel.market_type === 'clean_sheet_away') {
+          won = sel.selection === 'yes' ? scoreA === 0 : scoreA > 0;
+        } else if (sel.market_type === 'total_goals_exact') {
+          if (sel.selection === '0_1') won = totalGoals <= 1;
+          else if (sel.selection === '2_3') won = totalGoals === 2 || totalGoals === 3;
+          else if (sel.selection === '4plus') won = totalGoals >= 4;
+        } else if (sel.market_type === 'corners') {
+          if (sel.selection === 'over_9.5') won = totalCorners > 9.5;
+          else if (sel.selection === 'under_9.5') won = totalCorners <= 9.5;
+        } else if (sel.market_type === 'cards') {
+          if (sel.selection === 'over_3.5') won = totalCards > 3.5;
+          else if (sel.selection === 'under_3.5') won = totalCards <= 3.5;
         }
         await supabase.from('bet_selections').update({ status: won ? 'won' : 'lost' }).eq('id', sel.id);
       }

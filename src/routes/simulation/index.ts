@@ -370,6 +370,15 @@ router.post('/admin/:id/edit-score', authenticate, requireAdmin, validateBody(z.
   const { data: match } = await supabase.from('simulated_matches').select('is_scripted, sport').eq('id', id).single();
 
   const isScripted = (match as any)?.is_scripted;
+  const eventId = `sim:${id}`;
+
+  // Suspend odds for 5 seconds so users can't bet on stale odds during update
+  await supabase.from('odds_feed').update({ status: 'suspended' })
+    .eq('event_id', eventId).eq('source', 'simulation');
+  try { getIO().emit('odds:suspended', { eventId }); } catch {}
+
+  await new Promise(resolve => setTimeout(resolve, 5000));
+
   if (isScripted) ScriptedMatchEngine.overrideScore(id, req.body.home_score, req.body.away_score);
   else SimulationEngine.overrideScore(id, req.body.home_score, req.body.away_score);
 
@@ -377,7 +386,11 @@ router.post('/admin/:id/edit-score', authenticate, requireAdmin, validateBody(z.
     .update({ team_a_score: req.body.home_score, team_b_score: req.body.away_score })
     .eq('id', id);
 
-  // Immediately push updated score to all connected clients
+  // Reopen odds and push updated score to all connected clients
+  await supabase.from('odds_feed').update({ status: 'active' })
+    .eq('event_id', eventId).eq('source', 'simulation');
+  try { getIO().emit('odds:active', { eventId }); } catch {}
+
   if (isScripted) ScriptedMatchEngine.broadcastState(id);
   else SimulationEngine.broadcastState(id);
 
