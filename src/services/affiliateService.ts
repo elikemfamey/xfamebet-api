@@ -1,6 +1,21 @@
 import { supabase } from '../config/supabase';
 
+// Approximate mid-market rates — kept in sync with admin/payments page
+const TO_USD: Record<string, number> = {
+  GHS: 1 / 11,
+  NGN: 1 / 1550,
+  KES: 1 / 130,
+  ZAR: 1 / 18.5,
+  USDT: 1,
+  USD: 1,
+};
+
+function toUsd(amount: number, currency: string): number {
+  return parseFloat((amount * (TO_USD[currency] ?? 1)).toFixed(2));
+}
+
 export class AffiliateService {
+  // Bets are placed from the GHS wallet, so stake/payout are always GHS
   static async creditBetCommission(
     userId: string,
     stake: number,
@@ -8,6 +23,9 @@ export class AffiliateService {
   ): Promise<void> {
     const netRevenue = Math.max(0, stake - payout);
     if (netRevenue <= 0) return;
+
+    const stakeUsd = toUsd(stake, 'GHS');
+    const netRevenueUsd = toUsd(netRevenue, 'GHS');
 
     const { data: referral } = await supabase
       .from('affiliate_referrals')
@@ -27,14 +45,14 @@ export class AffiliateService {
 
     let commission = 0;
     if (aff.commission_type === 'revenue_share' || aff.commission_type === 'hybrid') {
-      commission = netRevenue * aff.commission_rate;
+      commission = parseFloat((netRevenueUsd * aff.commission_rate).toFixed(2));
     }
     if (commission <= 0) return;
 
     await supabase
       .from('affiliate_referrals')
       .update({
-        betting_volume: referral.betting_volume + stake,
+        betting_volume: referral.betting_volume + stakeUsd,
         commission_earned: referral.commission_earned + commission,
       })
       .eq('id', referral.id);
@@ -53,11 +71,11 @@ export class AffiliateService {
       event_type: 'bet_rev_share',
       commission_amount: commission,
       source_amount: stake,
-      source_currency: 'USD',
+      source_currency: 'GHS',
     });
   }
 
-  static async creditCpaCommission(userId: string, depositAmount: number, depositCurrency = 'USD'): Promise<void> {
+  static async creditCpaCommission(userId: string, depositAmount: number, depositCurrency = 'GHS'): Promise<void> {
     const { data: referral } = await supabase
       .from('affiliate_referrals')
       .select('id, affiliate_id, deposit_total, commission_earned')
@@ -74,14 +92,16 @@ export class AffiliateService {
 
     if (!aff || aff.approval_status !== 'approved') return;
 
-    const newDepositTotal = referral.deposit_total + depositAmount;
-    const isFirstDeposit = referral.deposit_total === 0 && depositAmount >= 60;
+    // Convert deposit to USD — all affiliate monetary values are stored in USD
+    const depositUsd = toUsd(depositAmount, depositCurrency);
+    const newDepositTotal = referral.deposit_total + depositUsd;
+    const isFirstDeposit = referral.deposit_total === 0 && depositUsd >= 60;
 
     let commission = 0;
     let eventType = '';
 
     if (aff.commission_type === 'revenue_share') {
-      commission = depositAmount * aff.commission_rate;
+      commission = parseFloat((depositUsd * aff.commission_rate).toFixed(2));
       eventType = 'deposit_rev_share';
     } else if (aff.commission_type === 'cpa') {
       if (isFirstDeposit) {
@@ -90,10 +110,10 @@ export class AffiliateService {
       }
     } else if (aff.commission_type === 'hybrid') {
       if (isFirstDeposit) {
-        commission = (aff.cpa_amount ?? 0) + depositAmount * aff.commission_rate;
+        commission = parseFloat(((aff.cpa_amount ?? 0) + depositUsd * aff.commission_rate).toFixed(2));
         eventType = 'deposit_hybrid';
       } else {
-        commission = depositAmount * aff.commission_rate;
+        commission = parseFloat((depositUsd * aff.commission_rate).toFixed(2));
         eventType = 'deposit_rev_share';
       }
     }
@@ -120,8 +140,8 @@ export class AffiliateService {
         referred_user_id: userId,
         event_type: eventType,
         commission_amount: commission,
-        source_amount: depositAmount,
-        source_currency: depositCurrency,
+        source_amount: depositAmount,       // original native amount for display
+        source_currency: depositCurrency,   // original currency for display
       });
     }
   }
