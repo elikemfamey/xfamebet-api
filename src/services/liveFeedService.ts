@@ -173,7 +173,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       homeScore,
       awayScore,
       odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
-      oddsLocked: homeOdds == null && awayOdds == null,
+      oddsLocked: false,
       markets,
       sportKey: scoreData.sport_key,
       kickedOffAt: first.starts_at ?? null,
@@ -221,7 +221,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
         homeScore: String(score.home_score),
         awayScore: String(score.away_score),
         odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
-        oddsLocked: homeOdds == null,
+        oddsLocked: false,
         markets,
         sportKey: 'sportmonks',
         kickedOffAt: null,
@@ -239,7 +239,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     const matchOddsRows = byEvent.get(scriptEventId) ?? [];
     processedEventIds.add(scriptEventId);
 
-    const { homeOdds, drawOdds, awayOdds, markets, suspended } = extractH2H(matchOddsRows);
+    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchOddsRows);
     const minuteLabel = (match.current_minute ?? 0) > 0 ? `${match.current_minute}'` : 'LIVE';
 
     result.push({
@@ -254,7 +254,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       homeScore: String(match.team_a_score ?? 0),
       awayScore: String(match.team_b_score ?? 0),
       odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
-      oddsLocked: suspended || homeOdds == null,
+      oddsLocked: false,
       markets,
       sportKey: match.sport ?? 'football',
       kickedOffAt: match.started_at ?? null,
@@ -296,7 +296,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       homeScore: null,
       awayScore: null,
       odds: [homeOdds ?? '-', drawOdds ?? '-', awayOdds ?? '-'],
-      oddsLocked: homeOdds == null && awayOdds == null,
+      oddsLocked: false,
       markets,
       sportKey: eventSport,
       kickedOffAt: first.starts_at,
@@ -319,10 +319,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     if (pDiff !== 0) return pDiff;
     const aHasScore = a.homeScore !== null ? 1 : 0;
     const bHasScore = b.homeScore !== null ? 1 : 0;
-    if (bHasScore !== aHasScore) return bHasScore - aHasScore;
-    const aLocked = a.oddsLocked ? 0 : 1;
-    const bLocked = b.oddsLocked ? 0 : 1;
-    return bLocked - aLocked;
+    return bHasScore - aHasScore;
   });
 
   return result;
