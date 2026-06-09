@@ -136,6 +136,28 @@ router.get('/football/live-stats', async (req, res) => {
   }
 });
 
+// GET /matches/logos?ids=sim:uuid1,sim:uuid2,... - batch logo lookup for simulation matches
+// Returns Record<eventId, { home_logo, away_logo }>
+router.get('/logos', async (req, res) => {
+  const raw = (req.query.ids as string) ?? '';
+  const eventIds = raw.split(',').map(s => s.trim()).filter(Boolean);
+  const simIds = eventIds.filter(id => id.startsWith('sim:'));
+
+  if (simIds.length === 0) return sendSuccess(res, {});
+
+  const matchIds = simIds.map(id => id.slice(4));
+  const { data } = await supabase
+    .from('simulated_matches')
+    .select('id, home_logo, away_logo')
+    .in('id', matchIds);
+
+  const result: Record<string, { home_logo: string | null; away_logo: string | null }> = {};
+  for (const row of data ?? []) {
+    result[`sim:${row.id}`] = { home_logo: row.home_logo ?? null, away_logo: row.away_logo ?? null };
+  }
+  return sendSuccess(res, result);
+});
+
 // GET /matches/:eventId/meta - logo and metadata for a match (simulation only)
 router.get('/:eventId/meta', async (req, res) => {
   const { eventId } = req.params;
