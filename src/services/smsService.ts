@@ -62,7 +62,12 @@ export async function sendOtpSms(phone: string, otp: string, country = 'GH'): Pr
   const recipient = result.SMSMessageData.Recipients[0];
   if (!recipient || recipient.status !== 'Success') {
     logger.error('sms_delivery_failed', { phone: normalizedPhone, status: recipient?.status });
-    throw new Error('SMS delivery failed. Please try again.');
+    const permanent = recipient?.status === 'DoNotDisturbRejection' || recipient?.status === 'UserInBlacklist';
+    const err = new Error(
+      permanent ? 'SMS is blocked on this number by your carrier.' : 'SMS delivery failed. Please try again.',
+    ) as Error & { permanent: boolean };
+    err.permanent = permanent;
+    throw err;
   }
 
   logger.info('sms_sent', { phone: normalizedPhone });

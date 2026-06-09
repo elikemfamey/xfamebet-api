@@ -483,12 +483,13 @@ router.post('/send-otp', authenticate, async (req, res) => {
 
   const otp = generateOtp();
   await redis.setex(REDIS_KEYS.OTP(req.user!.id), 600, otp);
+  await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
   try {
     await sendOtpSms(user.phone, otp, user.country ?? 'GH');
-    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
   } catch (smsErr) {
+    const e = smsErr as Error & { permanent?: boolean };
     logger.error('send-otp sms failed', { smsErr, phone: user.phone });
-    return sendError(res, 'SMS delivery failed. Please try again.', 503);
+    return sendError(res, e.permanent ? 'SMS is blocked on this number by your carrier.' : 'SMS delivery failed. Please try again.', 503);
   }
 
   return sendSuccess(res, { message: 'OTP sent' });
@@ -519,19 +520,22 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
       JSON.stringify({ phone, password_hash, country, username, referral_code: referral_code ?? null, promo_code: promo_code ?? null, new_referral_code: newReferralCode, otp }),
     );
 
+    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(phone), 60, '1');
     let smsSent = true;
+    let smsErrMsg = 'SMS delivery failed. Tap "Resend OTP" to try again.';
     try {
       await sendOtpSms(phone, otp, country);
-      await redis.setex(REDIS_KEYS.OTP_COOLDOWN(phone), 60, '1');
     } catch (smsErr) {
+      const e = smsErr as Error & { permanent?: boolean };
       logger.error('register-phone sms failed', { smsErr, phone });
       smsSent = false;
+      if (e.permanent) smsErrMsg = 'SMS is blocked on this number by your carrier. Please contact support.';
     }
 
     return sendSuccess(res, {
       user_id: pending_id,
       sms_sent: smsSent,
-      message: smsSent ? 'OTP sent to your phone number.' : 'SMS delivery failed. Tap "Resend OTP" to try again.',
+      message: smsSent ? 'OTP sent to your phone number.' : smsErrMsg,
       otp: env.NODE_ENV !== 'production' ? otp : undefined,
     }, smsSent ? 201 : 202);
   } catch (err) {
@@ -558,18 +562,21 @@ router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (re
     pending.otp = otp;
     // Reset the 10-min TTL with updated OTP
     await redis.setex(REDIS_KEYS.PENDING_REG(user_id), 600, JSON.stringify(pending));
+    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(pending.phone), 60, '1');
     let smsSent = true;
+    let smsErrMsg = 'SMS delivery failed. Please try again shortly.';
     try {
       await sendOtpSms(pending.phone, otp, pending.country ?? 'GH');
-      await redis.setex(REDIS_KEYS.OTP_COOLDOWN(pending.phone), 60, '1');
     } catch (smsErr) {
+      const e = smsErr as Error & { permanent?: boolean };
       logger.error('resend-otp sms failed', { smsErr, phone: pending.phone });
       smsSent = false;
+      if (e.permanent) smsErrMsg = 'SMS is blocked on this number by your carrier. Please contact support.';
     }
 
     return sendSuccess(res, {
       sms_sent: smsSent,
-      message: smsSent ? 'OTP resent' : 'SMS delivery failed. Please try again shortly.',
+      message: smsSent ? 'OTP resent' : smsErrMsg,
       otp: env.NODE_ENV !== 'production' ? otp : undefined,
     }, smsSent ? 200 : 503);
   }
@@ -584,12 +591,16 @@ router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (re
 
   const otp = generateOtp();
   await redis.setex(REDIS_KEYS.OTP(user_id), 600, otp);
+  await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
   try {
     await sendOtpSms(user.phone, otp, user.country ?? 'GH');
-    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
   } catch (smsErr) {
+    const e = smsErr as Error & { permanent?: boolean };
     logger.error('resend-otp (db user) sms failed', { smsErr, phone: user.phone });
-    return sendError(res, 'SMS delivery failed. Please try again shortly.', 503);
+    const msg = e.permanent
+      ? 'SMS is blocked on this number by your carrier. Please contact support.'
+      : 'SMS delivery failed. Please try again shortly.';
+    return sendError(res, msg, 503);
   }
 
   return sendSuccess(res, {
