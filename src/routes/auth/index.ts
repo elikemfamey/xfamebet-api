@@ -496,14 +496,12 @@ router.post('/send-otp', authenticate, async (req, res) => {
 });
 
 // POST /auth/register-phone — Step 1: phone + password → store pending in Redis → send OTP
-// User is NOT written to DB until OTP is verified
+// Nigerian numbers (+234) skip OTP entirely and are written directly to DB.
+// All other numbers go through pending Redis → OTP → verify-otp flow.
 router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), async (req, res) => {
   const { phone, password, country, referral_code, promo_code } = req.body;
 
   try {
-    const cooldown = await redis.get(REDIS_KEYS.OTP_COOLDOWN(phone));
-    if (cooldown) return sendError(res, 'Please wait 60 seconds before requesting another OTP', 429);
-
     const { data: existing } = await supabase.from('users').select('id').eq('phone', phone).single();
     if (existing) return sendError(res, 'Phone number already registered', 409);
 
@@ -511,6 +509,72 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
     const username = `user_${phone.replace(/\D/g, '').slice(-6)}_${suffix}`;
     const password_hash = await hashPassword(password);
     const newReferralCode = generateReferralCode();
+
+    // Nigerian numbers — skip OTP, write directly to DB
+    if (phone.startsWith('+234')) {
+      let affiliateId: string | null = null;
+      let referredById: string | null = null;
+      if (referral_code) {
+        const { data: refUser } = await supabase.from('users').select('id').eq('referral_code', referral_code).single();
+        if (refUser) {
+          referredById = refUser.id;
+          const { data: aff } = await supabase.from('affiliates').select('id').eq('user_id', refUser.id).single();
+          affiliateId = aff?.id ?? null;
+        }
+      }
+
+      const { data: user, error } = await supabase.from('users').insert({
+        username,
+        phone,
+        phone_verified: true,
+        password_hash,
+        country,
+        referral_code: newReferralCode,
+        referred_by: referredById,
+        affiliate_id: affiliateId,
+      }).select().single();
+
+      if (error || !user) return sendError(res, 'Registration failed', 500);
+
+      if (promo_code) {
+        const { data: promo } = await supabase.from('promo_codes').select('*').eq('code', promo_code.toUpperCase()).eq('status', 'active').single();
+        if (promo && (!promo.usage_limit || promo.used_count < promo.usage_limit)) {
+          const { data: wallet } = await supabase.from('wallets').select('id').eq('user_id', user.id).single();
+          if (wallet) {
+            await supabase.from('user_bonus_grants').insert({ user_id: user.id, promo_code_id: promo.id, amount: promo.value, wagering_required: promo.value * 3 });
+            await supabase.rpc('credit_bonus', { p_wallet_id: wallet.id, p_amount: promo.value });
+            await supabase.from('promo_codes').update({ used_count: promo.used_count + 1 }).eq('id', promo.id);
+          }
+        }
+      }
+
+      if (affiliateId && referral_code) {
+        await Promise.all([
+          supabase.from('affiliate_clicks')
+            .update({ converted: true, converted_user_id: user.id })
+            .eq('referral_code', referral_code)
+            .is('converted_user_id', null)
+            .order('created_at', { ascending: false })
+            .limit(1),
+          supabase.from('affiliate_referrals').insert({ affiliate_id: affiliateId, referred_user_id: user.id }),
+        ]);
+      }
+
+      FraudService.emitEvent(user.id, 'registration', { ip: req.ip, device: req.headers['user-agent'], phone }).catch(
+        (err) => logger.error('register-phone-ng fraud event failed', { err })
+      );
+
+      return sendSuccess(res, {
+        user_id: user.id,
+        otp_required: false,
+        message: 'Registration successful.',
+      }, 201);
+    }
+
+    // All other countries — OTP flow
+    const cooldown = await redis.get(REDIS_KEYS.OTP_COOLDOWN(phone));
+    if (cooldown) return sendError(res, 'Please wait 60 seconds before requesting another OTP', 429);
+
     const pending_id = uuidv4();
     const otp = generateOtp();
 
@@ -534,6 +598,7 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
 
     return sendSuccess(res, {
       user_id: pending_id,
+      otp_required: true,
       sms_sent: smsSent,
       message: smsSent ? 'OTP sent to your phone number.' : smsErrMsg,
       otp: env.NODE_ENV !== 'production' ? otp : undefined,
