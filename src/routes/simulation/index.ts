@@ -456,6 +456,44 @@ router.post('/admin/:id/edit-score', authenticate, requireAdmin, validateBody(z.
   return sendSuccess(res, { message: 'Score updated' });
 });
 
+// ── Admin: time control (duration + skip minute) ──────────────────────────────
+
+router.patch('/admin/:id/time-control', authenticate, requireAdmin, validateBody(z.object({
+  duration_minutes: z.number().int().min(1).max(180).optional(),
+  current_minute:   z.number().int().min(0).max(180).optional(),
+})), async (req, res) => {
+  const { id } = req.params;
+  const { duration_minutes, current_minute } = req.body;
+
+  const { data: match } = await supabase.from('simulated_matches').select('is_scripted, sport').eq('id', id).single();
+  if (!match) return sendError(res, 'Match not found', 404);
+  const isScripted = (match as any)?.is_scripted;
+
+  const dbUpdates: Record<string, unknown> = {};
+
+  if (duration_minutes !== undefined) {
+    dbUpdates.duration_minutes = duration_minutes;
+    if (isScripted) ScriptedMatchEngine.setDuration(id, duration_minutes);
+    else SimulationEngine.setDuration(id, duration_minutes);
+  }
+
+  if (current_minute !== undefined) {
+    dbUpdates.current_minute = current_minute;
+    if (isScripted) ScriptedMatchEngine.setMinute(id, current_minute);
+    else SimulationEngine.setMinute(id, current_minute);
+  }
+
+  if (Object.keys(dbUpdates).length > 0) {
+    await supabase.from('simulated_matches').update(dbUpdates).eq('id', id);
+  }
+
+  await bustLiveFeedCache((match as any)?.sport);
+  if (isScripted) ScriptedMatchEngine.broadcastState(id);
+  else SimulationEngine.broadcastState(id);
+
+  return sendSuccess(res, { message: 'Time updated' });
+});
+
 // ── Admin: inject event ───────────────────────────────────────────────────────
 
 router.post('/admin/:id/inject-event', authenticate, requireAdmin, validateBody(z.object({

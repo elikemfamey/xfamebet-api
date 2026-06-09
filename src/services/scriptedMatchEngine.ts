@@ -544,6 +544,20 @@ export class ScriptedMatchEngine {
     }
   }
 
+  static setDuration(matchId: string, duration: number) {
+    const state = matchStates.get(matchId);
+    if (state) state.duration = duration;
+  }
+
+  static setMinute(matchId: string, minute: number) {
+    const state = matchStates.get(matchId);
+    if (state) {
+      state.minute = minute;
+      if (minute < Math.floor(state.duration / 2)) state.phase = 'first_half';
+      else if (minute < state.duration) state.phase = 'second_half';
+    }
+  }
+
   static broadcastState(matchId: string) {
     const state = matchStates.get(matchId);
     if (!state) return;
