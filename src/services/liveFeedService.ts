@@ -98,7 +98,6 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       .from('odds_feed')
       .select('event_id, event_name, market_type, selection, odds_value, sport, league, starts_at, status')
       .in('status', ['active', 'suspended'])
-      .not('sport', 'ilike', 'virtual_%')
       .order('updated_at', { ascending: false })
       .limit(1000),
     supabase

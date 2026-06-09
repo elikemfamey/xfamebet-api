@@ -53,7 +53,6 @@ router.get('/live', async (req, res) => {
     .select('*')
     .eq('status', 'active')
     .lte('starts_at', new Date().toISOString())
-    .not('sport', 'ilike', 'virtual_%')
     .order('starts_at', { ascending: true, nullsFirst: false })
     .limit(100);
 
