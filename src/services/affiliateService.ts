@@ -68,13 +68,24 @@ export class AffiliateService {
     };
 
     if (aff.approval_status !== 'approved') return;
-    if (aff.commission_type !== 'cpa' && aff.commission_type !== 'hybrid') return;
 
+    const newDepositTotal = referral.deposit_total + depositAmount;
+
+    // Revenue share affiliates: track deposit volume but no CPA commission
+    if (aff.commission_type !== 'cpa' && aff.commission_type !== 'hybrid') {
+      await supabase
+        .from('affiliate_referrals')
+        .update({ deposit_total: newDepositTotal })
+        .eq('id', referral.id);
+      return;
+    }
+
+    // CPA/hybrid: only pay commission on the first qualifying deposit
     const isFirstDeposit = referral.deposit_total === 0 && depositAmount >= 10;
     if (!isFirstDeposit) {
       await supabase
         .from('affiliate_referrals')
-        .update({ deposit_total: referral.deposit_total + depositAmount })
+        .update({ deposit_total: newDepositTotal })
         .eq('id', referral.id);
       return;
     }
@@ -84,7 +95,7 @@ export class AffiliateService {
     await supabase
       .from('affiliate_referrals')
       .update({
-        deposit_total: referral.deposit_total + depositAmount,
+        deposit_total: newDepositTotal,
         commission_earned: referral.commission_earned + commission,
       })
       .eq('id', referral.id);

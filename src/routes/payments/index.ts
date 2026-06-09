@@ -134,6 +134,7 @@ router.post('/paystack/webhook', asyncHandler(async (req, res) => {
       );
       await NotificationService.send(deposit.user_id, 'deposit_approved',
         'Deposit Approved', `Your deposit of GHS ${deposit.amount} has been credited.`);
+      AffiliateService.creditCpaCommission(deposit.user_id, deposit.amount).catch(() => {});
     }
   }
 
@@ -530,9 +531,20 @@ router.post('/admin/withdrawals/:id/reject', authenticate, requireAdmin, validat
 
   await supabase.from('withdrawal_requests').update({ status: 'rejected', reviewed_by: req.user!.id, reviewed_at: new Date().toISOString(), notes }).eq('id', id);
 
-  // Refund the deducted amount
-  await WalletService.credit(withdrawal.user_id, withdrawal.amount, 'refund', undefined, undefined, 'Withdrawal rejected - funds returned');
-  await NotificationService.send(withdrawal.user_id, 'withdrawal_rejected', 'Withdrawal Rejected', `Your withdrawal was rejected. ${notes ?? ''} Funds returned to wallet.`);
+  const isAffiliateWithdrawal = (withdrawal.account_details as Record<string, unknown>)?.type === 'affiliate_earnings';
+  if (isAffiliateWithdrawal) {
+    // Restore affiliate withdrawal_balance (main wallet was never debited for affiliate earnings)
+    const { data: affiliate } = await supabase.from('affiliates').select('id, withdrawal_balance').eq('user_id', withdrawal.user_id).single();
+    if (affiliate) {
+      await supabase.from('affiliates')
+        .update({ withdrawal_balance: affiliate.withdrawal_balance + withdrawal.amount })
+        .eq('id', affiliate.id);
+    }
+  } else {
+    // Regular withdrawal: refund the wallet that was debited at request time
+    await WalletService.credit(withdrawal.user_id, withdrawal.amount, 'refund', undefined, undefined, 'Withdrawal rejected - funds returned');
+  }
+  await NotificationService.send(withdrawal.user_id, 'withdrawal_rejected', 'Withdrawal Rejected', `Your withdrawal was rejected. ${notes ?? ''} Funds returned to your account.`);
   await AdminLogService.log(req.user!.id, 'reject_withdrawal', 'withdrawal_request', id, { notes });
 
   return sendSuccess(res, { message: 'Withdrawal rejected and funds returned' });
