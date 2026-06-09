@@ -4,6 +4,7 @@ import { redis, REDIS_KEYS } from '../../config/redis';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { getCachedLiveScores } from '../../services/liveScoreService';
 import { buildLiveFeed } from '../../services/liveFeedService';
+import { getPopularMatches } from '../../services/popularMatchService';
 
 const router = Router();
 
@@ -101,6 +102,16 @@ router.get('/debug/feed-state', async (req, res) => {
     odds_feed_rows: oddsResult.data?.length ?? 0,
     odds_feed_sample: oddsResult.data ?? [],
   });
+});
+
+// GET /matches/popular - daily curated popular matches (cached 24 h, refreshed at midnight)
+router.get('/popular', async (req, res) => {
+  try {
+    const matches = await getPopularMatches();
+    return sendSuccess(res, matches);
+  } catch (err) {
+    return sendError(res, 'Failed to fetch popular matches', 500);
+  }
 });
 
 // GET /matches/:eventId/odds - all markets for an event

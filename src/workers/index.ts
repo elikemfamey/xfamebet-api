@@ -6,6 +6,7 @@ import { fetchAndCacheLiveScores as fetchFromApiFootball } from '../services/liv
 import { fetchAllSportsScores } from '../services/oddsApiScoreService';
 import { settlePendingBets } from '../services/betSettlementService';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
+import { refreshPopularMatches } from '../services/popularMatchService';
 import { logger } from '../utils/logger';
 
 async function fetchLiveScores(): Promise<void> {
@@ -18,6 +19,15 @@ async function fetchLiveScores(): Promise<void> {
 }
 
 export function startWorkers() {
+  // Refresh popular matches every day at midnight
+  cron.schedule('0 0 * * *', async () => {
+    try {
+      await refreshPopularMatches();
+    } catch (err) {
+      logger.error('Popular matches refresh error', { err });
+    }
+  });
+
   // Reset responsible gambling daily counters at midnight
   cron.schedule('0 0 * * *', async () => {
     try {
@@ -158,6 +168,7 @@ export function startWorkers() {
       await fetchLiveScores();
       const sports = await getActiveSports();
       await fetchAllSportsScores(sports.map(s => s.key));
+      await refreshPopularMatches();
     } catch (err) {
       logger.error('Initial ingestion error', { err });
     }

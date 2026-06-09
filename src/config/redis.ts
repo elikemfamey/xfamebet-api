@@ -16,6 +16,7 @@ export const REDIS_KEYS = {
   USER_SESSIONS: (userId: string) => `user:${userId}:sessions`,
   LIVE_ODDS: (eventId: string) => `odds:live:${eventId}`,
   ALL_ODDS: 'odds:all',
+  POPULAR_MATCHES: (date: string) => `popular_matches:${date}`,
   RATE_LIMIT: (ip: string, route: string) => `ratelimit:${ip}:${route}`,
   FRAUD_EVENTS: (userId: string) => `fraud:${userId}:events`,
   LIVE_MATCH: (matchId: string) => `live:match:${matchId}`,
