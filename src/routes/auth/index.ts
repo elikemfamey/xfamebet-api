@@ -417,8 +417,12 @@ router.post('/reset-password', authLimiter, validateBody(resetSchema), async (re
     await redis.setex(`pwd_reset:${user.id}`, 600, otp);
 
     if (user.phone) {
-      await sendOtpSms(user.phone, otp, user.country ?? 'GH');
-      await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
+      try {
+        await sendOtpSms(user.phone, otp, user.country ?? 'GH');
+        await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
+      } catch (smsErr) {
+        logger.error('reset-password sms failed', { smsErr, phone: user.phone });
+      }
     } else {
       logger.info('pwd_reset_otp', { otp, user_id: user.id });
     }
@@ -479,8 +483,13 @@ router.post('/send-otp', authenticate, async (req, res) => {
 
   const otp = generateOtp();
   await redis.setex(REDIS_KEYS.OTP(req.user!.id), 600, otp);
-  await sendOtpSms(user.phone, otp, user.country ?? 'GH');
-  await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
+  try {
+    await sendOtpSms(user.phone, otp, user.country ?? 'GH');
+    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
+  } catch (smsErr) {
+    logger.error('send-otp sms failed', { smsErr, phone: user.phone });
+    return sendError(res, 'SMS delivery failed. Please try again.', 503);
+  }
 
   return sendSuccess(res, { message: 'OTP sent' });
 });
@@ -549,13 +558,20 @@ router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (re
     pending.otp = otp;
     // Reset the 10-min TTL with updated OTP
     await redis.setex(REDIS_KEYS.PENDING_REG(user_id), 600, JSON.stringify(pending));
-    await sendOtpSms(pending.phone, otp, pending.country ?? 'GH');
-    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(pending.phone), 60, '1');
+    let smsSent = true;
+    try {
+      await sendOtpSms(pending.phone, otp, pending.country ?? 'GH');
+      await redis.setex(REDIS_KEYS.OTP_COOLDOWN(pending.phone), 60, '1');
+    } catch (smsErr) {
+      logger.error('resend-otp sms failed', { smsErr, phone: pending.phone });
+      smsSent = false;
+    }
 
     return sendSuccess(res, {
-      message: 'OTP resent',
+      sms_sent: smsSent,
+      message: smsSent ? 'OTP resent' : 'SMS delivery failed. Please try again shortly.',
       otp: env.NODE_ENV !== 'production' ? otp : undefined,
-    });
+    }, smsSent ? 200 : 503);
   }
 
   // Fallback: existing DB user (e.g. email-registered user needing phone OTP)
@@ -568,8 +584,13 @@ router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (re
 
   const otp = generateOtp();
   await redis.setex(REDIS_KEYS.OTP(user_id), 600, otp);
-  await sendOtpSms(user.phone, otp, user.country ?? 'GH');
-  await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
+  try {
+    await sendOtpSms(user.phone, otp, user.country ?? 'GH');
+    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
+  } catch (smsErr) {
+    logger.error('resend-otp (db user) sms failed', { smsErr, phone: user.phone });
+    return sendError(res, 'SMS delivery failed. Please try again shortly.', 503);
+  }
 
   return sendSuccess(res, {
     message: 'OTP resent',
