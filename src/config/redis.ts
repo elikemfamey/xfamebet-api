@@ -24,6 +24,7 @@ export const REDIS_KEYS = {
   WALLET_LOCK: (userId: string) => `wallet:lock:${userId}`,
   OTP: (userId: string) => `otp:${userId}`,
   OTP_COOLDOWN: (phone: string) => `otp_cooldown:${phone}`,
+  PENDING_REG: (id: string) => `pending_reg:${id}`,
   AFFILIATE_CLICKS: (affiliateId: string) => `affiliate:${affiliateId}:clicks`,
 };
 

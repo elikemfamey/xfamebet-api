@@ -202,11 +202,79 @@ router.post('/register', authLimiter, validateBody(registerSchema), async (req, 
 // POST /auth/verify-otp
 router.post('/verify-otp', authLimiter, validateBody(otpSchema), async (req, res) => {
   const { user_id, otp } = req.body;
-  const storedOtp = await redis.get(REDIS_KEYS.OTP(user_id));
 
-  if (!storedOtp || storedOtp !== otp) {
-    return sendError(res, 'Invalid or expired OTP', 400);
+  // Pending phone registration (user not yet in DB)
+  const pendingRaw = await redis.get(REDIS_KEYS.PENDING_REG(user_id));
+  if (pendingRaw) {
+    const pending = JSON.parse(pendingRaw) as {
+      phone: string; password_hash: string; country: string; username: string;
+      referral_code: string | null; promo_code: string | null; new_referral_code: string; otp: string;
+    };
+
+    if (pending.otp !== otp) return sendError(res, 'Invalid or expired OTP', 400);
+
+    // Resolve referral
+    let affiliateId: string | null = null;
+    let referredById: string | null = null;
+    if (pending.referral_code) {
+      const { data: refUser } = await supabase.from('users').select('id').eq('referral_code', pending.referral_code).single();
+      if (refUser) {
+        referredById = refUser.id;
+        const { data: aff } = await supabase.from('affiliates').select('id').eq('user_id', refUser.id).single();
+        affiliateId = aff?.id ?? null;
+      }
+    }
+
+    const { data: user, error } = await supabase.from('users').insert({
+      username: pending.username,
+      phone: pending.phone,
+      phone_verified: true,
+      password_hash: pending.password_hash,
+      country: pending.country,
+      referral_code: pending.new_referral_code,
+      referred_by: referredById,
+      affiliate_id: affiliateId,
+    }).select().single();
+
+    if (error || !user) return sendError(res, 'Registration failed', 500);
+
+    await redis.del(REDIS_KEYS.PENDING_REG(user_id));
+
+    // Apply promo code
+    if (pending.promo_code) {
+      const { data: promo } = await supabase.from('promo_codes').select('*').eq('code', pending.promo_code.toUpperCase()).eq('status', 'active').single();
+      if (promo && (!promo.usage_limit || promo.used_count < promo.usage_limit)) {
+        const { data: wallet } = await supabase.from('wallets').select('id').eq('user_id', user.id).single();
+        if (wallet) {
+          await supabase.from('user_bonus_grants').insert({ user_id: user.id, promo_code_id: promo.id, amount: promo.value, wagering_required: promo.value * 3 });
+          await supabase.rpc('credit_bonus', { p_wallet_id: wallet.id, p_amount: promo.value });
+          await supabase.from('promo_codes').update({ used_count: promo.used_count + 1 }).eq('id', promo.id);
+        }
+      }
+    }
+
+    FraudService.emitEvent(user.id, 'registration', { ip: req.ip, device: req.headers['user-agent'], phone: pending.phone }).catch(
+      (err) => logger.error('verify-otp fraud event failed', { err })
+    );
+
+    if (affiliateId && pending.referral_code) {
+      await Promise.all([
+        supabase.from('affiliate_clicks')
+          .update({ converted: true, converted_user_id: user.id })
+          .eq('referral_code', pending.referral_code)
+          .is('converted_user_id', null)
+          .order('created_at', { ascending: false })
+          .limit(1),
+        supabase.from('affiliate_referrals').insert({ affiliate_id: affiliateId, referred_user_id: user.id }),
+      ]);
+    }
+
+    return sendSuccess(res, { message: 'OTP verified successfully' });
   }
+
+  // Existing DB user OTP (email registration, re-verification, etc.)
+  const storedOtp = await redis.get(REDIS_KEYS.OTP(user_id));
+  if (!storedOtp || storedOtp !== otp) return sendError(res, 'Invalid or expired OTP', 400);
 
   await supabase.from('users').update({ phone_verified: true }).eq('id', user_id);
   await redis.del(REDIS_KEYS.OTP(user_id));
@@ -417,7 +485,8 @@ router.post('/send-otp', authenticate, async (req, res) => {
   return sendSuccess(res, { message: 'OTP sent' });
 });
 
-// POST /auth/register-phone — Step 1: phone + password → create user → send OTP
+// POST /auth/register-phone — Step 1: phone + password → store pending in Redis → send OTP
+// User is NOT written to DB until OTP is verified
 router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), async (req, res) => {
   const { phone, password, country, referral_code, promo_code } = req.body;
 
@@ -428,70 +497,18 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
     const { data: existing } = await supabase.from('users').select('id').eq('phone', phone).single();
     if (existing) return sendError(res, 'Phone number already registered', 409);
 
-    let affiliateId: string | null = null;
-    let referredById: string | null = null;
-    if (referral_code) {
-      const { data: refUser } = await supabase.from('users').select('id').eq('referral_code', referral_code).single();
-      if (refUser) {
-        referredById = refUser.id;
-        const { data: aff } = await supabase.from('affiliates').select('id').eq('user_id', refUser.id).single();
-        affiliateId = aff?.id ?? null;
-      }
-    }
-
     const suffix = Math.random().toString(36).slice(2, 7);
     const username = `user_${phone.replace(/\D/g, '').slice(-6)}_${suffix}`;
     const password_hash = await hashPassword(password);
     const newReferralCode = generateReferralCode();
-
-    const { data: user, error } = await supabase.from('users').insert({
-      username,
-      phone,
-      phone_verified: false,
-      password_hash,
-      country,
-      referral_code: newReferralCode,
-      referred_by: referredById,
-      affiliate_id: affiliateId,
-    }).select().single();
-
-    if (error || !user) return sendError(res, 'Registration failed', 500);
-
+    const pending_id = uuidv4();
     const otp = generateOtp();
-    await redis.setex(REDIS_KEYS.OTP(user.id), 600, otp);
 
-    // Apply promo code if provided
-    if (promo_code) {
-      const { data: promo } = await supabase.from('promo_codes').select('*').eq('code', promo_code.toUpperCase()).eq('status', 'active').single();
-      if (promo && (!promo.usage_limit || promo.used_count < promo.usage_limit)) {
-        const { data: wallet } = await supabase.from('wallets').select('id').eq('user_id', user.id).single();
-        if (wallet) {
-          await supabase.from('user_bonus_grants').insert({ user_id: user.id, promo_code_id: promo.id, amount: promo.value, wagering_required: promo.value * 3 });
-          await supabase.rpc('credit_bonus', { p_wallet_id: wallet.id, p_amount: promo.value });
-          await supabase.from('promo_codes').update({ used_count: promo.used_count + 1 }).eq('id', promo.id);
-        }
-      }
-    }
-
-    FraudService.emitEvent(user.id, 'registration', { ip: req.ip, device: req.headers['user-agent'], phone }).catch(
-      (err) => logger.error('register-phone fraud event failed', { err })
+    await redis.setex(
+      REDIS_KEYS.PENDING_REG(pending_id),
+      600,
+      JSON.stringify({ phone, password_hash, country, username, referral_code: referral_code ?? null, promo_code: promo_code ?? null, new_referral_code: newReferralCode, otp }),
     );
-
-    // Track affiliate click conversion and create referral record
-    if (affiliateId && referral_code) {
-      await Promise.all([
-        supabase.from('affiliate_clicks')
-          .update({ converted: true, converted_user_id: user.id })
-          .eq('referral_code', referral_code)
-          .is('converted_user_id', null)
-          .order('created_at', { ascending: false })
-          .limit(1),
-        supabase.from('affiliate_referrals').insert({
-          affiliate_id: affiliateId,
-          referred_user_id: user.id,
-        }),
-      ]);
-    }
 
     let smsSent = true;
     try {
@@ -503,8 +520,8 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
     }
 
     return sendSuccess(res, {
-      user_id: user.id,
-      message: smsSent ? 'OTP sent to your phone number.' : 'Account created. OTP delivery failed — please use Resend OTP.',
+      user_id: pending_id,
+      message: smsSent ? 'OTP sent to your phone number.' : 'OTP delivery failed — please use Resend OTP.',
       otp: env.NODE_ENV !== 'production' ? otp : undefined,
     }, 201);
   } catch (err) {
@@ -519,8 +536,30 @@ const resendOtpSchema = z.object({ user_id: z.string().uuid() });
 router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (req, res) => {
   const { user_id } = req.body;
 
+  // Pending registration (user not yet in DB)
+  const pendingRaw = await redis.get(REDIS_KEYS.PENDING_REG(user_id));
+  if (pendingRaw) {
+    const pending = JSON.parse(pendingRaw) as { phone: string; country: string; otp: string; [key: string]: unknown };
+
+    const cooldown = await redis.get(REDIS_KEYS.OTP_COOLDOWN(pending.phone));
+    if (cooldown) return sendError(res, 'Please wait 60 seconds before requesting another OTP', 429);
+
+    const otp = generateOtp();
+    pending.otp = otp;
+    // Reset the 10-min TTL with updated OTP
+    await redis.setex(REDIS_KEYS.PENDING_REG(user_id), 600, JSON.stringify(pending));
+    await sendOtpSms(pending.phone, otp, pending.country ?? 'GH');
+    await redis.setex(REDIS_KEYS.OTP_COOLDOWN(pending.phone), 60, '1');
+
+    return sendSuccess(res, {
+      message: 'OTP resent',
+      otp: env.NODE_ENV !== 'production' ? otp : undefined,
+    });
+  }
+
+  // Fallback: existing DB user (e.g. email-registered user needing phone OTP)
   const { data: user } = await supabase.from('users').select('phone, country, phone_verified').eq('id', user_id).single();
-  if (!user?.phone) return sendError(res, 'User not found', 404);
+  if (!user?.phone) return sendError(res, 'Registration session expired. Please start over.', 404);
   if (user.phone_verified) return sendError(res, 'Phone already verified', 400);
 
   const cooldown = await redis.get(REDIS_KEYS.OTP_COOLDOWN(user.phone));
