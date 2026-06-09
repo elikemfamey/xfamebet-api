@@ -12,16 +12,17 @@ router.get('/', async (req, res) => {
   const sport = req.query.sport as string;
   const live = req.query.live === 'true';
   const page = parseInt(req.query.page as string) || 1;
-  const limit = parseInt(req.query.limit as string) || 30;
+  // High limit so all 35+ market rows per match fit without truncation
+  const limit = parseInt(req.query.limit as string) || 1000;
   const offset = (page - 1) * limit;
 
-  // Try Redis cache first
+  // Only cache the unfiltered page-1 response — sport-filtered requests skip
+  // cache to avoid collisions, and existing bust logic (del ALL_ODDS) stays valid
+  const canCache = !sport && page === 1;
   const cacheKey = REDIS_KEYS.ALL_ODDS;
-  const cached = await redis.get(cacheKey);
-
-  if (cached && !live) {
-    const data = JSON.parse(cached);
-    return sendSuccess(res, data);
+  if (canCache && !live) {
+    const cached = await redis.get(cacheKey);
+    if (cached) return sendSuccess(res, JSON.parse(cached));
   }
 
   let query = supabase
@@ -36,7 +37,7 @@ router.get('/', async (req, res) => {
 
   const { data, count } = await query;
 
-  if (!live) {
+  if (canCache && !live) {
     await redis.setex(cacheKey, 30, JSON.stringify(data));
   }
 
