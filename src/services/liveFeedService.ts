@@ -306,7 +306,17 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
   logger.debug(`[LiveFeed] Step 4 (fallback) total now ${result.length} matches`);
 
   // Sort: events with actual scores first, then those with odds, then locked
+  function sportPriority(m: LiveFeedMatch): number {
+    if (m.sportKey === 'soccer_fifa_world_cup' || m.league === 'FIFA World Cup') return 0;
+    if (m.sport === 'football') return 1;
+    if (m.sport === 'basketball') return 2;
+    if (m.sport === 'tennis') return 3;
+    return 4;
+  }
+
   result.sort((a, b) => {
+    const pDiff = sportPriority(a) - sportPriority(b);
+    if (pDiff !== 0) return pDiff;
     const aHasScore = a.homeScore !== null ? 1 : 0;
     const bHasScore = b.homeScore !== null ? 1 : 0;
     if (bHasScore !== aHasScore) return bHasScore - aHasScore;
