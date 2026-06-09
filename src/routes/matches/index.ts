@@ -136,6 +136,27 @@ router.get('/football/live-stats', async (req, res) => {
   }
 });
 
+// GET /matches/:eventId/meta - logo and metadata for a match (simulation only)
+router.get('/:eventId/meta', async (req, res) => {
+  const { eventId } = req.params;
+
+  if (!eventId.startsWith('sim:')) {
+    return sendSuccess(res, { home_logo: null, away_logo: null });
+  }
+
+  const matchId = eventId.slice(4);
+  const { data } = await supabase
+    .from('simulated_matches')
+    .select('home_logo, away_logo')
+    .eq('id', matchId)
+    .single();
+
+  return sendSuccess(res, {
+    home_logo: data?.home_logo ?? null,
+    away_logo: data?.away_logo ?? null,
+  });
+});
+
 // GET /matches/:eventId/odds - all markets for an event
 router.get('/:eventId/odds', async (req, res) => {
   const cached = await redis.get(REDIS_KEYS.LIVE_ODDS(req.params.eventId));
