@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { supabase } from '../config/supabase';
 import { ingestAllOdds, getActiveSports } from '../services/oddsIngestionService';
-import { fetchAndCacheLiveScores as fetchFromSportMonks } from '../services/sportmonksLiveScoreService';
+import { fetchAndCacheLiveScores as fetchFromSportMonks, fetchLatestLiveScoreUpdates } from '../services/sportmonksLiveScoreService';
 import { fetchAndCacheLiveScores as fetchFromApiFootball } from '../services/liveScoreService';
 import { fetchAllSportsScores } from '../services/oddsApiScoreService';
 import { settlePendingBets } from '../services/betSettlementService';
@@ -121,6 +121,16 @@ export function startWorkers() {
       logger.error('Live scores worker error', { err });
     }
   });
+
+  // Poll SportMonks /livescores/latest every 15 seconds for incremental updates
+  // (only fixtures that changed in the last 10s — cheap, high-frequency)
+  setInterval(async () => {
+    try {
+      await fetchLatestLiveScoreUpdates();
+    } catch (err: any) {
+      logger.debug('[LiveScores] Latest-update poll error', { message: err.message });
+    }
+  }, 15_000);
 
   // Fetch Odds API scores for all active sports every 2 minutes (covers all sports)
   cron.schedule('*/2 * * * *', async () => {

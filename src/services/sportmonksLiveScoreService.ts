@@ -218,6 +218,81 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
   return scores;
 }
 
+// ─── Latest-updated incremental sync ─────────────────────────────────────────
+// Calls /livescores/latest (fixtures changed in last 10s) and merges them into
+// the cached array so we get minute-by-minute score/status updates without
+// replacing the whole cache on every tick.
+
+export async function fetchLatestLiveScoreUpdates(): Promise<void> {
+  if (!env.SPORTMONKS_API_TOKEN) return;
+
+  const resp = await axios.get(`${BASE_URL}/livescores/latest`, {
+    params: {
+      api_token: env.SPORTMONKS_API_TOKEN,
+      include: 'participants;scores;state;statistics.type;events.type',
+    },
+    timeout: 10000,
+  });
+
+  const fixtures: any[] = resp.data?.data ?? [];
+  if (fixtures.length === 0) return;
+
+  // Load the current full cache so we can merge into it
+  const cached: LiveScore[] = JSON.parse((await redis.get(REDIS_KEY)) ?? '[]');
+  const byId = new Map(cached.map(s => [s.fixture_id, s]));
+  const enriched: Array<{ fixture: any; homeId: number; ls: LiveScore }> = [];
+
+  for (const f of fixtures) {
+    const participants: any[] = f.participants ?? [];
+    const home = participants.find((p: any) => p.meta?.location === 'home');
+    const away = participants.find((p: any) => p.meta?.location === 'away');
+    if (!home || !away) continue;
+
+    const developerName: string = f.state?.developer_name ?? '';
+    if (!IN_PLAY_STATES.has(developerName)) {
+      byId.delete(f.id); // match ended — remove from cache
+      continue;
+    }
+
+    const statusShort = STATE_TO_STATUS[developerName] ?? '';
+    const minute = computeMinute(f.starting_at ?? null, developerName);
+
+    const scoreObjs: any[] = f.scores ?? [];
+    const homeGoals = scoreObjs.find((s: any) => s.participant_id === home.id && s.description === 'CURRENT')?.score?.goals ?? 0;
+    const awayGoals = scoreObjs.find((s: any) => s.participant_id === away.id && s.description === 'CURRENT')?.score?.goals ?? 0;
+
+    const existing = byId.get(f.id);
+    const ls: LiveScore = {
+      fixture_id:   f.id,
+      home_team:    home.name,
+      away_team:    away.name,
+      home_logo:    home.image_path ?? existing?.home_logo ?? null,
+      away_logo:    away.image_path ?? existing?.away_logo ?? null,
+      home_score:   homeGoals,
+      away_score:   awayGoals,
+      minute,
+      status_short: statusShort,
+      league:       f.league?.name ?? existing?.league ?? '',
+      country:      f.league?.country?.name ?? existing?.country ?? '',
+    };
+
+    byId.set(f.id, ls);
+    enriched.push({ fixture: f, homeId: home.id, ls });
+  }
+
+  const merged = Array.from(byId.values());
+  await redis.setex(REDIS_KEY, TTL, JSON.stringify(merged));
+
+  // Bust live-feed variant caches so the next request reflects changes
+  const feedKeys = await redis.keys('live_feed:*');
+  if (feedKeys.length > 0) await redis.del(...feedKeys);
+
+  if (enriched.length > 0) {
+    logger.debug(`[SportMonks] Latest update: ${enriched.length} fixture(s) changed`);
+    await broadcastFixtureDetails(enriched);
+  }
+}
+
 // ─── Per-fixture socket broadcasting ─────────────────────────────────────────
 
 async function broadcastFixtureDetails(

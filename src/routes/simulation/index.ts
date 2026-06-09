@@ -433,6 +433,46 @@ router.post('/admin/:id/inject-event', authenticate, requireAdmin, validateBody(
   return sendSuccess(res, { message: 'Event injected' });
 });
 
+// ── Admin: delete simulation ──────────────────────────────────────────────────
+
+router.delete('/admin/:id', authenticate, requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const eventId = `sim:${id}`;
+
+  const { data: match } = await supabase
+    .from('simulated_matches')
+    .select('is_scripted, sport, status')
+    .eq('id', id)
+    .single();
+
+  if (!match) return sendError(res, 'Simulation not found', 404);
+
+  // Stop the engine if it is actively running
+  if (['live', 'paused'].includes((match as any).status)) {
+    if ((match as any).is_scripted) ScriptedMatchEngine.stopMatch(id);
+    else SimulationEngine.stopMatch(id);
+  }
+
+  // Remove all odds for this simulation from the sportsbook
+  await supabase.from('odds_feed').delete().eq('event_id', eventId);
+
+  // Hard-delete the match record (cascades to match_events)
+  await supabase.from('simulated_matches').delete().eq('id', id);
+
+  // Bust every relevant cache entry
+  const cacheKeys: string[] = ['live_feed:', `live_feed:${(match as any).sport}`, `live_odds:${eventId}`];
+  const extraKeys = await redis.keys(`live_feed:*`);
+  const allKeys = Array.from(new Set([...cacheKeys, ...extraKeys]));
+  if (allKeys.length > 0) await redis.del(...allKeys);
+
+  // Notify all connected clients so they remove the match instantly
+  try {
+    getIO().emit('simulation:deleted', { matchId: id });
+  } catch {}
+
+  return sendSuccess(res, { message: 'Simulation deleted' });
+});
+
 // ── Admin: monitoring dashboard ───────────────────────────────────────────────
 
 router.get('/admin/all', authenticate, requireAdmin, async (req, res) => {
