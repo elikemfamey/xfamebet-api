@@ -1,10 +1,6 @@
 import { supabase } from '../config/supabase';
 
 export class AffiliateService {
-  /**
-   * Call after a bet is settled. Calculates and credits revenue-share commission
-   * to the referring affiliate (if any) based on net house revenue from the bet.
-   */
   static async creditBetCommission(
     userId: string,
     stake: number,
@@ -13,17 +9,9 @@ export class AffiliateService {
     const netRevenue = Math.max(0, stake - payout);
     if (netRevenue <= 0) return;
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('affiliate_id')
-      .eq('id', userId)
-      .single();
-    if (!user?.affiliate_id) return;
-
     const { data: referral } = await supabase
       .from('affiliate_referrals')
-      .select('id, betting_volume, commission_earned, affiliate_id, affiliates(commission_type, commission_rate, approval_status, total_earnings, withdrawal_balance)')
-      .eq('affiliate_id', user.affiliate_id)
+      .select('id, affiliate_id, betting_volume, commission_earned, affiliates(commission_type, commission_rate, approval_status, total_earnings, withdrawal_balance)')
       .eq('referred_user_id', userId)
       .single();
 
@@ -59,25 +47,13 @@ export class AffiliateService {
         total_earnings: aff.total_earnings + commission,
         withdrawal_balance: aff.withdrawal_balance + commission,
       })
-      .eq('id', user.affiliate_id);
+      .eq('id', referral.affiliate_id);
   }
 
-  /**
-   * Call when a referred user makes their first qualifying deposit.
-   * Credits CPA commission to the referring affiliate.
-   */
   static async creditCpaCommission(userId: string, depositAmount: number): Promise<void> {
-    const { data: user } = await supabase
-      .from('users')
-      .select('affiliate_id')
-      .eq('id', userId)
-      .single();
-    if (!user?.affiliate_id) return;
-
     const { data: referral } = await supabase
       .from('affiliate_referrals')
-      .select('id, deposit_total, commission_earned, affiliates(commission_type, cpa_amount, approval_status, total_earnings, withdrawal_balance)')
-      .eq('affiliate_id', user.affiliate_id)
+      .select('id, affiliate_id, deposit_total, commission_earned, affiliates(commission_type, cpa_amount, approval_status, total_earnings, withdrawal_balance)')
       .eq('referred_user_id', userId)
       .single();
 
@@ -94,10 +70,8 @@ export class AffiliateService {
     if (aff.approval_status !== 'approved') return;
     if (aff.commission_type !== 'cpa' && aff.commission_type !== 'hybrid') return;
 
-    // Only pay CPA on the first qualifying deposit (deposit_total was 0 before)
     const isFirstDeposit = referral.deposit_total === 0 && depositAmount >= 10;
     if (!isFirstDeposit) {
-      // Still update deposit_total even if not first deposit
       await supabase
         .from('affiliate_referrals')
         .update({ deposit_total: referral.deposit_total + depositAmount })
@@ -122,7 +96,7 @@ export class AffiliateService {
           total_earnings: aff.total_earnings + commission,
           withdrawal_balance: aff.withdrawal_balance + commission,
         })
-        .eq('id', user.affiliate_id);
+        .eq('id', referral.affiliate_id);
     }
   }
 }
