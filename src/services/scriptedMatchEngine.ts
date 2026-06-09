@@ -558,6 +558,24 @@ export class ScriptedMatchEngine {
     }
   }
 
+  static async forceFulltime(matchId: string) {
+    const interval = activeMatches.get(matchId);
+    if (interval) {
+      clearInterval(interval);
+      activeMatches.delete(matchId);
+    }
+
+    let state = matchStates.get(matchId);
+    if (!state) {
+      const { data: match } = await supabase.from('simulated_matches').select('*').eq('id', matchId).single();
+      if (!match) return;
+      state = buildStateFromDb(match as Record<string, unknown>, (match as any).duration_minutes ?? 90);
+      matchStates.set(matchId, state);
+    }
+
+    await handleScriptedFulltime(matchId, state);
+  }
+
   static broadcastState(matchId: string) {
     const state = matchStates.get(matchId);
     if (!state) return;

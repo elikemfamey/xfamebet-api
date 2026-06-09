@@ -494,6 +494,19 @@ router.patch('/admin/:id/time-control', authenticate, requireAdmin, validateBody
   return sendSuccess(res, { message: 'Time updated' });
 });
 
+// ── Admin: force full time ────────────────────────────────────────────────────
+
+router.post('/admin/:id/force-fulltime', authenticate, requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
+  if (!match) return sendError(res, 'Match not found', 404);
+
+  if ((match as any)?.is_scripted) await ScriptedMatchEngine.forceFulltime(id);
+  else await SimulationEngine.forceFulltime(id);
+
+  return sendSuccess(res, { message: 'Match ended — bets settled' });
+});
+
 // ── Admin: override 1X2 odds ──────────────────────────────────────────────────
 
 router.patch('/admin/:id/odds', authenticate, requireAdmin, validateBody(z.object({

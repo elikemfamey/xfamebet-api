@@ -391,10 +391,57 @@ export class SimulationEngine {
     const state = matchStates.get(matchId);
     if (state) {
       state.minute = minute;
-      // Re-evaluate phase based on new minute
       if (minute < Math.floor(state.duration / 2)) state.phase = 'first_half';
       else if (minute < state.duration) state.phase = 'second_half';
     }
+  }
+
+  static async forceFulltime(matchId: string) {
+    const interval = activeMatches.get(matchId);
+    if (interval) {
+      clearInterval(interval);
+      activeMatches.delete(matchId);
+    }
+
+    let state = matchStates.get(matchId);
+    if (!state) {
+      const { data: match } = await supabase.from('simulated_matches').select('*').eq('id', matchId).single();
+      if (!match) return;
+      const duration = (match as any).duration_minutes ?? 90;
+      state = {
+        id: matchId,
+        teamA: match.team_a,
+        teamB: match.team_b,
+        scoreA: (match as any).team_a_score ?? 0,
+        scoreB: (match as any).team_b_score ?? 0,
+        minute: duration,
+        duration,
+        goalProb: match.goal_probability ?? 0.03,
+        cardProb: match.card_probability ?? 0.05,
+        teamAStrength: match.team_a_strength ?? 5,
+        teamBStrength: match.team_b_strength ?? 5,
+        league: (match as any).competition ?? match.league_name ?? 'XfameBet Virtual League',
+        sport: match.sport ?? 'virtual_football',
+        startsAt: match.scheduled_at ?? new Date().toISOString(),
+        possession: { a: 50, b: 50 },
+        shots: { a: 0, b: 0 },
+        fouls: { a: 0, b: 0 },
+        yellowCards: { a: [], b: [] },
+        redCards: { a: [], b: [] },
+        momentum: [0],
+        phase: 'second_half',
+        extraTimeMinute: 0,
+        htExtraTotal: 1,
+        htBreakTicksLeft: 0,
+        ftExtraTotal: 1,
+        halftimeScoreA: 0,
+        halftimeScoreB: 0,
+        firstScorerTeam: null,
+      };
+      matchStates.set(matchId, state);
+    }
+
+    await SimulationEngine.handleFulltime(matchId, state);
   }
 
   static broadcastState(matchId: string) {
