@@ -490,6 +490,52 @@ router.delete('/admin/:id', authenticate, requireAdmin, async (req, res) => {
   return sendSuccess(res, { message: 'Simulation deleted' });
 });
 
+// ── Admin: simulation leagues ─────────────────────────────────────────────────
+
+const leagueTeamSchema = z.object({
+  name:     z.string().min(1),
+  logo:     z.string().optional(),
+  strength: z.number().min(1).max(10).default(6),
+  tactics:  z.enum(['attacking', 'balanced', 'defensive', 'possession']).default('balanced'),
+});
+
+const leagueSchema = z.object({
+  name:  z.string().min(1).max(100),
+  sport: z.string().default('football'),
+  teams: z.array(leagueTeamSchema).min(5).max(12),
+});
+
+// GET /simulation/admin/leagues
+router.get('/admin/leagues', authenticate, requireAdmin, async (_req, res) => {
+  const { data, error } = await supabase
+    .from('simulation_leagues')
+    .select('*')
+    .order('name');
+  if (error) return sendError(res, error.message, 500);
+  return sendSuccess(res, data ?? []);
+});
+
+// POST /simulation/admin/leagues
+router.post('/admin/leagues', authenticate, requireAdmin, validateBody(leagueSchema), async (req, res) => {
+  const { data, error } = await supabase
+    .from('simulation_leagues')
+    .insert({ name: req.body.name, sport: req.body.sport, teams: req.body.teams })
+    .select()
+    .single();
+  if (error) return sendError(res, error.message, 500);
+  return sendSuccess(res, data, 201);
+});
+
+// DELETE /simulation/admin/leagues/:leagueId
+router.delete('/admin/leagues/:leagueId', authenticate, requireAdmin, async (req, res) => {
+  const { error } = await supabase
+    .from('simulation_leagues')
+    .delete()
+    .eq('id', req.params.leagueId);
+  if (error) return sendError(res, error.message, 500);
+  return sendSuccess(res, { message: 'League deleted' });
+});
+
 // ── Admin: monitoring dashboard ───────────────────────────────────────────────
 
 router.get('/admin/all', authenticate, requireAdmin, async (req, res) => {

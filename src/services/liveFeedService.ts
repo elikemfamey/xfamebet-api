@@ -70,6 +70,75 @@ function formatKickoff(isoString: string): string {
   return `${month}/${day} ${hh}:${mm}`;
 }
 
+// Maps Odds API sport_key prefixes to our internal sport enum values
+const SPORT_KEY_PREFIX: Record<string, string> = {
+  soccer: 'football',
+  basketball: 'basketball',
+  tennis: 'tennis',
+  americanfootball: 'american_football',
+  baseball: 'baseball',
+  icehockey: 'ice_hockey',
+  cricket: 'cricket',
+  rugbyunion: 'rugby',
+  rugbyleague: 'rugby_league',
+  mma: 'mma',
+  golf: 'golf',
+  aussierules: 'aussie_rules',
+  boxing: 'boxing',
+};
+
+function sportFromKey(sportKey: string): string {
+  const prefix = sportKey.split('_')[0];
+  return SPORT_KEY_PREFIX[prefix] ?? 'football';
+}
+
+function simpleHash(str: string): number {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h;
+}
+
+const NO_DRAW_SPORTS = new Set([
+  'basketball', 'tennis', 'american_football', 'baseball',
+  'ice_hockey', 'mma', 'golf', 'horse_racing', 'aussie_rules', 'boxing', 'greyhound',
+]);
+
+/**
+ * Generates deterministic simulated odds when no real odds exist for a live event.
+ * Uses a hash of the event_id so odds are stable across refreshes.
+ */
+function simulateFallbackOdds(
+  sport: string,
+  eventId: string,
+): { homeOdds: number; drawOdds: number | undefined; awayOdds: number } {
+  const seed = simpleHash(eventId);
+  const r1 = (seed % 1000) / 1000;
+  const r2 = (simpleHash(eventId + 'd') % 1000) / 1000;
+  const margin = 1.05;
+  const cap = (v: number) => parseFloat(Math.min(v, 5.50).toFixed(2));
+
+  if (NO_DRAW_SPORTS.has(sport)) {
+    const homeProb = 0.35 + r1 * 0.35;
+    return {
+      homeOdds: cap(margin / homeProb),
+      drawOdds: undefined,
+      awayOdds: cap(margin / (1 - homeProb)),
+    };
+  }
+
+  const homeProb = 0.32 + r1 * 0.25;
+  const drawProb = 0.22 + r2 * 0.10;
+  const awayProb = Math.max(0.15, 1 - homeProb - drawProb);
+  return {
+    homeOdds: cap(margin / homeProb),
+    drawOdds: cap(margin / drawProb),
+    awayOdds: cap(margin / awayProb),
+  };
+}
+
 function extractH2H(rows: OddsRow[]) {
   const h2h = rows.filter(r => r.market_type === 'match_winner');
   const suspended = h2h.some(r => r.status === 'suspended');
@@ -130,16 +199,20 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     if (!scoreData.scores) continue;
 
     const rows = byEvent.get(eventId) ?? [];
-    if (!rows.length) continue; // no odds on file for this event
-
     const first = rows[0];
-    const eventSport = first.sport;
+    const eventSport = first?.sport ?? sportFromKey(scoreData.sport_key);
 
     if (sport && eventSport !== sport) continue;
 
     processedEventIds.add(eventId);
 
-    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(rows);
+    let { homeOdds, drawOdds, awayOdds, markets } = extractH2H(rows);
+    if (homeOdds === undefined || awayOdds === undefined) {
+      const fb = simulateFallbackOdds(eventSport, eventId);
+      homeOdds = fb.homeOdds;
+      drawOdds = fb.drawOdds;
+      awayOdds = fb.awayOdds;
+    }
     const homeScore = getScore(scoreData, 'home');
     const awayScore = getScore(scoreData, 'away');
 
@@ -164,7 +237,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     result.push({
       eventId,
       oddsEventId: eventId,
-      league: first.league ?? 'Other',
+      league: first?.league ?? 'Other',
       sport: eventSport,
       isLive: true,
       status: statusStr,
@@ -176,7 +249,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       oddsLocked: false,
       markets,
       sportKey: scoreData.sport_key,
-      kickedOffAt: first.starts_at ?? null,
+      kickedOffAt: first?.starts_at ?? null,
     });
   }
 
@@ -207,7 +280,13 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
 
       if (matchedEventId) processedEventIds.add(matchedEventId);
 
-      const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchedRows);
+      let { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchedRows);
+      if (homeOdds === undefined || awayOdds === undefined) {
+        const fb = simulateFallbackOdds('football', `af:${score.fixture_id}`);
+        homeOdds = fb.homeOdds;
+        drawOdds = fb.drawOdds;
+        awayOdds = fb.awayOdds;
+      }
 
       result.push({
         eventId: `af:${score.fixture_id}`,
@@ -239,7 +318,13 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     const matchOddsRows = byEvent.get(scriptEventId) ?? [];
     processedEventIds.add(scriptEventId);
 
-    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchOddsRows);
+    let { homeOdds, drawOdds, awayOdds, markets } = extractH2H(matchOddsRows);
+    if (homeOdds === undefined || awayOdds === undefined) {
+      const fb = simulateFallbackOdds(match.sport ?? 'football', scriptEventId);
+      homeOdds = fb.homeOdds;
+      drawOdds = fb.drawOdds;
+      awayOdds = fb.awayOdds;
+    }
     const minuteLabel = (match.current_minute ?? 0) > 0 ? `${match.current_minute}'` : 'LIVE';
 
     result.push({
@@ -279,7 +364,13 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     const eventSport = first.sport;
     if (sport && eventSport !== sport) continue;
 
-    const { homeOdds, drawOdds, awayOdds, markets } = extractH2H(rows);
+    let { homeOdds, drawOdds, awayOdds, markets } = extractH2H(rows);
+    if (homeOdds === undefined || awayOdds === undefined) {
+      const fb = simulateFallbackOdds(eventSport, eventId);
+      homeOdds = fb.homeOdds;
+      drawOdds = fb.drawOdds;
+      awayOdds = fb.awayOdds;
+    }
     const [homeName = first.event_name, awayName = ''] = first.event_name.includes(' vs ')
       ? first.event_name.split(' vs ').map((s: string) => s.trim())
       : [first.event_name];
