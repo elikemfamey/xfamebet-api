@@ -7,7 +7,7 @@ import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { SimulationEngine } from '../../services/simulationEngine';
 import { ScriptedMatchEngine } from '../../services/scriptedMatchEngine';
-import { getIO } from '../../socket';
+import { getIO, broadcastOddsUpdate } from '../../socket';
 
 async function bustLiveFeedCache(sport?: string) {
   await Promise.all([
@@ -492,6 +492,41 @@ router.patch('/admin/:id/time-control', authenticate, requireAdmin, validateBody
   else SimulationEngine.broadcastState(id);
 
   return sendSuccess(res, { message: 'Time updated' });
+});
+
+// ── Admin: override 1X2 odds ──────────────────────────────────────────────────
+
+router.patch('/admin/:id/odds', authenticate, requireAdmin, validateBody(z.object({
+  home_odds: z.number().min(1.01).max(200),
+  draw_odds: z.number().min(1.01).max(200),
+  away_odds: z.number().min(1.01).max(200),
+})), async (req, res) => {
+  const { id } = req.params;
+  const { home_odds, draw_odds, away_odds } = req.body;
+  const eventId = `sim:${id}`;
+
+  const { data: match } = await supabase.from('simulated_matches').select('sport').eq('id', id).single();
+  if (!match) return sendError(res, 'Match not found', 404);
+
+  await supabase.from('odds_feed')
+    .update({ odds_value: parseFloat(home_odds.toFixed(2)), updated_at: new Date().toISOString() })
+    .eq('event_id', eventId).eq('market_type', 'match_winner').eq('selection', 'home');
+  await supabase.from('odds_feed')
+    .update({ odds_value: parseFloat(draw_odds.toFixed(2)), updated_at: new Date().toISOString() })
+    .eq('event_id', eventId).eq('market_type', 'match_winner').eq('selection', 'draw');
+  await supabase.from('odds_feed')
+    .update({ odds_value: parseFloat(away_odds.toFixed(2)), updated_at: new Date().toISOString() })
+    .eq('event_id', eventId).eq('market_type', 'match_winner').eq('selection', 'away');
+
+  broadcastOddsUpdate(eventId, [
+    { selection: 'home', odds_value: parseFloat(home_odds.toFixed(2)) },
+    { selection: 'draw', odds_value: parseFloat(draw_odds.toFixed(2)) },
+    { selection: 'away', odds_value: parseFloat(away_odds.toFixed(2)) },
+  ]);
+
+  await bustLiveFeedCache((match as any)?.sport);
+
+  return sendSuccess(res, { message: 'Odds updated' });
 });
 
 // ── Admin: inject event ───────────────────────────────────────────────────────
