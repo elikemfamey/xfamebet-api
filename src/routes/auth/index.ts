@@ -521,9 +521,10 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
 
     return sendSuccess(res, {
       user_id: pending_id,
-      message: smsSent ? 'OTP sent to your phone number.' : 'OTP delivery failed — please use Resend OTP.',
+      sms_sent: smsSent,
+      message: smsSent ? 'OTP sent to your phone number.' : 'SMS delivery failed. Tap "Resend OTP" to try again.',
       otp: env.NODE_ENV !== 'production' ? otp : undefined,
-    }, 201);
+    }, smsSent ? 201 : 202);
   } catch (err) {
     logger.error('register-phone error', { err });
     return sendError(res, 'Registration failed', 500);
