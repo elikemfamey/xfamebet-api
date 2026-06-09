@@ -513,6 +513,30 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
   }
 });
 
+// POST /auth/resend-otp — unauthenticated resend during registration
+const resendOtpSchema = z.object({ user_id: z.string().uuid() });
+
+router.post('/resend-otp', authLimiter, validateBody(resendOtpSchema), async (req, res) => {
+  const { user_id } = req.body;
+
+  const { data: user } = await supabase.from('users').select('phone, country, phone_verified').eq('id', user_id).single();
+  if (!user?.phone) return sendError(res, 'User not found', 404);
+  if (user.phone_verified) return sendError(res, 'Phone already verified', 400);
+
+  const cooldown = await redis.get(REDIS_KEYS.OTP_COOLDOWN(user.phone));
+  if (cooldown) return sendError(res, 'Please wait 60 seconds before requesting another OTP', 429);
+
+  const otp = generateOtp();
+  await redis.setex(REDIS_KEYS.OTP(user_id), 600, otp);
+  await sendOtpSms(user.phone, otp, user.country ?? 'GH');
+  await redis.setex(REDIS_KEYS.OTP_COOLDOWN(user.phone), 60, '1');
+
+  return sendSuccess(res, {
+    message: 'OTP resent',
+    otp: env.NODE_ENV !== 'production' ? otp : undefined,
+  });
+});
+
 // POST /auth/verify-otp also marks phone_verified after phone registration
 // Handled by existing /verify-otp route — no change needed
 
