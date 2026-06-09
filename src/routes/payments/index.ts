@@ -315,6 +315,7 @@ router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSche
   const { data: wallet } = await supabase.from('wallets').select('*').eq('user_id', req.user!.id).single();
   if (!wallet) return sendError(res, 'Wallet not found', 404);
   if (wallet.frozen || wallet.withdrawal_frozen) return sendError(res, 'Withdrawals are frozen on your account', 403);
+  if (wallet.balance < 600) return sendError(res, 'A minimum balance of GHS 600 is required to make a withdrawal', 400);
   if (wallet.balance < amount) return sendError(res, 'Insufficient balance', 400);
 
   // Check responsible gambling limits
