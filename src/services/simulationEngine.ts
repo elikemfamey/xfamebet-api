@@ -1,6 +1,7 @@
 import { supabase } from '../config/supabase';
-import { getIO, broadcastBetWon, broadcastWalletUpdate, broadcastOddsUpdate } from '../socket';
+import { getIO, broadcastBetWon, broadcastWalletUpdate } from '../socket';
 import { redis, REDIS_KEYS } from '../config/redis';
+import { regulateOdds, OddsContext } from './liveOddsRegulator';
 import { WalletService } from './walletService';
 import { logger } from '../utils/logger';
 
@@ -94,6 +95,26 @@ const STANDARD_CORRECT_SCORES = [
   '2-2','3-0','0-3','3-1','1-3','3-2','2-3',
 ];
 
+function buildOddsContext(state: MatchState): OddsContext {
+  return {
+    matchId:       state.id,
+    sport:         state.sport,
+    league:        state.league,
+    startsAt:      state.startsAt,
+    teamAName:     state.teamA,
+    teamBName:     state.teamB,
+    scoreA:        state.scoreA,
+    scoreB:        state.scoreB,
+    currentMinute: state.minute,
+    duration:      state.duration,
+    goalProb:      state.goalProb,
+    teamAStrength: state.teamAStrength,
+    teamBStrength: state.teamBStrength,
+    phase:         state.phase,
+    firstScorerTeam: state.firstScorerTeam,
+  };
+}
+
 function pickRandom<T>(arr: T[]): T {
   return arr[Math.floor(Math.random() * arr.length)];
 }
@@ -160,8 +181,8 @@ export class SimulationEngine {
       // ── Halftime extra time: show 45+1, 45+2 … ────────────────────────────
       if (s.phase === 'halftime_extra') {
         s.extraTimeMinute++;
-        await SimulationEngine.updateLiveOdds(s);
         await SimulationEngine.processMinute(s);
+        await regulateOdds(buildOddsContext(s));
         SimulationEngine.broadcastMatchState(s, `45+${s.extraTimeMinute}`);
         await supabase.from('simulated_matches').update({ current_minute: 45, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
         if (s.extraTimeMinute >= s.htExtraTotal) {
@@ -176,8 +197,8 @@ export class SimulationEngine {
       // ── Fulltime extra time: show 90+1 … 90+N ─────────────────────────────
       if (s.phase === 'fulltime_extra') {
         s.extraTimeMinute++;
-        await SimulationEngine.updateLiveOdds(s);
         await SimulationEngine.processMinute(s);
+        await regulateOdds(buildOddsContext(s));
         SimulationEngine.broadcastMatchState(s, `90+${s.extraTimeMinute}`);
         await supabase.from('simulated_matches').update({ current_minute: 90, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
         if (s.extraTimeMinute >= s.ftExtraTotal) {
@@ -190,8 +211,8 @@ export class SimulationEngine {
 
       // ── Normal minute tick ─────────────────────────────────────────────────
       s.minute++;
-      await SimulationEngine.updateLiveOdds(s);
       await SimulationEngine.processMinute(s);
+      await regulateOdds(buildOddsContext(s));
       SimulationEngine.broadcastMatchState(s, `${s.minute}'`);
 
       await supabase.from('simulated_matches').update({
@@ -342,8 +363,8 @@ export class SimulationEngine {
       }
       if (s.phase === 'halftime_extra') {
         s.extraTimeMinute++;
-        await SimulationEngine.updateLiveOdds(s);
         await SimulationEngine.processMinute(s);
+        await regulateOdds(buildOddsContext(s));
         SimulationEngine.broadcastMatchState(s, `45+${s.extraTimeMinute}`);
         await supabase.from('simulated_matches').update({ current_minute: 45, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
         if (s.extraTimeMinute >= s.htExtraTotal) {
@@ -356,8 +377,8 @@ export class SimulationEngine {
       }
       if (s.phase === 'fulltime_extra') {
         s.extraTimeMinute++;
-        await SimulationEngine.updateLiveOdds(s);
         await SimulationEngine.processMinute(s);
+        await regulateOdds(buildOddsContext(s));
         SimulationEngine.broadcastMatchState(s, `90+${s.extraTimeMinute}`);
         await supabase.from('simulated_matches').update({ current_minute: 90, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
         if (s.extraTimeMinute >= s.ftExtraTotal) {
@@ -368,8 +389,8 @@ export class SimulationEngine {
         return;
       }
       s.minute++;
-      await SimulationEngine.updateLiveOdds(s);
       await SimulationEngine.processMinute(s);
+      await regulateOdds(buildOddsContext(s));
       SimulationEngine.broadcastMatchState(s, `${s.minute}'`);
       await supabase.from('simulated_matches').update({ current_minute: s.minute, team_a_score: s.scoreA, team_b_score: s.scoreB }).eq('id', matchId);
       if (s.minute === Math.floor(s.duration / 2) && s.phase === 'first_half') {
@@ -503,36 +524,6 @@ export class SimulationEngine {
     await SimulationEngine.emitEvent(state, state.minute, eventType, player, teamName, commentary);
   }
 
-  static async applyGoalOddsShock(state: MatchState, scoringTeam: 'a' | 'b') {
-    const boost = Math.random() < 0.3 ? 5 : 2;
-    const { data: odds } = await supabase
-      .from('odds_feed').select('selection, odds_value')
-      .eq('event_id', `sim:${state.id}`).eq('market_type', 'match_winner');
-
-    const homeOdds = odds?.find(o => o.selection === 'home')?.odds_value ?? 1.90;
-    const awayOdds = odds?.find(o => o.selection === 'away')?.odds_value ?? 1.90;
-
-    const newHome = scoringTeam === 'a'
-      ? parseFloat(Math.max(1.05, homeOdds - 0.15).toFixed(2))
-      : parseFloat(Math.min(50, homeOdds + boost).toFixed(2));
-    const newAway = scoringTeam === 'b'
-      ? parseFloat(Math.max(1.05, awayOdds - 0.15).toFixed(2))
-      : parseFloat(Math.min(50, awayOdds + boost).toFixed(2));
-
-    await supabase.from('odds_feed')
-      .update({ odds_value: newHome })
-      .eq('event_id', `sim:${state.id}`).eq('market_type', 'match_winner').eq('selection', 'home');
-    await supabase.from('odds_feed')
-      .update({ odds_value: newAway })
-      .eq('event_id', `sim:${state.id}`).eq('market_type', 'match_winner').eq('selection', 'away');
-
-    broadcastOddsUpdate(`sim:${state.id}`, [
-      { selection: 'home', odds_value: newHome },
-      { selection: 'away', odds_value: newAway },
-    ]);
-    redis.del('live_feed:').catch(() => {});
-    redis.del(`live_feed:${state.sport}`).catch(() => {});
-  }
 
   static async processMinute(state: MatchState) {
     const { goalProb, cardProb } = state;
@@ -557,7 +548,8 @@ export class SimulationEngine {
       await SimulationEngine.emitEvent(state, state.minute, 'goal', player, teamName, commentary, {
         score_a: state.scoreA, score_b: state.scoreB,
       });
-      await SimulationEngine.applyGoalOddsShock(state, scoringTeam);
+      // Immediate odds shock — recompute all markets right after the goal
+      await regulateOdds(buildOddsContext(state));
     } else if (goalRoll < goalProb * 2) {
       // Shot off target
       const teamAShots = Math.random() < teamAGoalWeight;
@@ -616,55 +608,6 @@ export class SimulationEngine {
     } catch {}
   }
 
-  static async updateLiveOdds(state: MatchState) {
-    const scoreDiff = state.scoreA - state.scoreB;
-    const minuteProgress = state.minute / state.duration;
-    const urgencyFactor = 1 + minuteProgress * 0.5;
-
-    let teamAWinOdds = 1.5 + (state.teamBStrength / state.teamAStrength) * 0.5;
-    let drawOdds = 3.2;
-    let teamBWinOdds = 1.5 + (state.teamAStrength / state.teamBStrength) * 0.5;
-
-    // Adjust for current score
-    if (scoreDiff > 0) {
-      teamAWinOdds = Math.max(1.05, teamAWinOdds - scoreDiff * 0.3 * urgencyFactor);
-      teamBWinOdds = Math.min(25, teamBWinOdds + scoreDiff * 0.5 * urgencyFactor);
-      drawOdds = Math.min(15, drawOdds + scoreDiff * 0.4);
-    } else if (scoreDiff < 0) {
-      teamBWinOdds = Math.max(1.05, teamBWinOdds + scoreDiff * 0.3 * urgencyFactor);
-      teamAWinOdds = Math.min(25, teamAWinOdds - scoreDiff * 0.5 * urgencyFactor);
-      drawOdds = Math.min(15, drawOdds - scoreDiff * 0.4);
-    }
-
-    const updates = [
-      { selection: 'home', odds_value: parseFloat(teamAWinOdds.toFixed(2)) },
-      { selection: 'draw', odds_value: parseFloat(drawOdds.toFixed(2)) },
-      { selection: 'away', odds_value: parseFloat(teamBWinOdds.toFixed(2)) },
-    ];
-
-    for (const update of updates) {
-      await supabase.from('odds_feed').upsert({
-        event_id: `sim:${state.id}`,
-        event_name: `${state.teamA} vs ${state.teamB}`,
-        market_type: 'match_winner',
-        selection: update.selection,
-        odds_value: update.odds_value,
-        source: 'simulation',
-        sport: state.sport,
-        league: state.league,
-        starts_at: state.startsAt,
-        status: 'active',
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'event_id,market_type,selection' });
-    }
-
-    try {
-      broadcastOddsUpdate(`sim:${state.id}`, updates);
-      // Bust live feed cache so the frontend gets fresh scores on next reload
-      redis.del('live_feed:').catch(() => {});
-      redis.del(`live_feed:${state.sport}`).catch(() => {});
-    } catch {}
-  }
 
   static async generateOdds(
     matchId: string,
