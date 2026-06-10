@@ -84,7 +84,9 @@ const DEFAULT_CORRECT_SCORE_ODDS: Record<string, number> = {
   '0-0': 7.00, '1-0': 5.50, '0-1': 7.00, '1-1': 5.00,
   '2-0': 8.00, '0-2': 10.00, '2-1': 7.00, '1-2': 9.00,
   '2-2': 12.00, '3-0': 14.00, '0-3': 18.00, '3-1': 12.00,
-  '1-3': 16.00, '3-2': 20.00, '2-3': 25.00, 'other': 28.00,
+  '1-3': 16.00, '3-2': 20.00, '2-3': 25.00, '3-3': 35.00,
+  '4-0': 30.00, '0-4': 40.00, '4-1': 35.00, '1-4': 45.00,
+  '4-2': 45.00, '2-4': 55.00, 'other': 60.00,
 };
 
 const STANDARD_CORRECT_SCORES = [
@@ -283,8 +285,14 @@ export class SimulationEngine {
     if (!matchStates.has(matchId)) {
       const { data: match } = await supabase.from('simulated_matches').select('*').eq('id', matchId).single();
       if (!match) return;
-      const fromMinute = (match as any).current_minute ?? 0;
       const duration = (match as any).duration_minutes ?? 90;
+      const savedMinute = (match as any).current_minute ?? 0;
+      // On crash recovery, calculate actual elapsed minutes from started_at so the
+      // timer jumps to the correct position instead of replaying from the last saved tick.
+      const startedAt = (match as any).started_at ? new Date((match as any).started_at).getTime() : null;
+      const fromMinute = startedAt
+        ? Math.min(Math.floor((Date.now() - startedAt) / 60_000), duration - 1)
+        : savedMinute;
       const state: MatchState = {
         id: matchId,
         teamA: match.team_a,

@@ -5,6 +5,7 @@ import { fetchAndCacheLiveScores as fetchFromSportMonks, fetchLatestLiveScoreUpd
 import { fetchAndCacheLiveScores as fetchFromApiFootball } from '../services/liveScoreService';
 import { fetchAllSportsScores } from '../services/oddsApiScoreService';
 import { settlePendingBets } from '../services/betSettlementService';
+import { SimulationEngine } from '../services/simulationEngine';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { refreshPopularMatches } from '../services/popularMatchService';
 import { logger } from '../utils/logger';
@@ -171,6 +172,28 @@ export function startWorkers() {
       await refreshPopularMatches();
     } catch (err) {
       logger.error('Initial ingestion error', { err });
+    }
+  });
+
+  // Recover simulations that were live when the server last crashed/restarted.
+  // resumeMatch calculates the correct minute from started_at, so the timer
+  // picks up at the actual elapsed time rather than the last saved DB tick.
+  setImmediate(async () => {
+    try {
+      const { data: liveMatches } = await supabase
+        .from('simulated_matches')
+        .select('id, is_scripted')
+        .eq('status', 'live');
+      for (const match of liveMatches ?? []) {
+        if ((match as any).is_scripted) {
+          await ScriptedMatchEngine.resumeMatch(match.id);
+        } else {
+          await SimulationEngine.resumeMatch(match.id);
+        }
+        logger.info(`Recovered live simulation ${match.id} after restart`);
+      }
+    } catch (err) {
+      logger.error('Simulation recovery error', { err });
     }
   });
 
