@@ -49,9 +49,6 @@ async function maybeLockWalletCurrency(userId: string, country: string, provider
     .eq('id', wallet.id);
 }
 
-/** Minimum wallet balance required before a withdrawal is allowed. */
-const WITHDRAWAL_MIN_BALANCE: Record<string, number> = { NGN: 30000, GHS: 300, USD: 30 };
-
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
 
@@ -389,9 +386,7 @@ router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSche
   if (!wallet) return sendError(res, 'Wallet not found', 404);
   if (wallet.frozen || wallet.withdrawal_frozen) return sendError(res, 'Withdrawals are frozen on your account', 403);
 
-  const minBalance = WITHDRAWAL_MIN_BALANCE[wallet.currency] ?? 30;
   const minWithdraw = WITHDRAWAL_MIN_AMOUNT[wallet.currency] ?? 10;
-  if (wallet.balance < minBalance) return sendError(res, `A minimum balance of ${wallet.currency} ${minBalance} is required to make a withdrawal`, 400);
   if (amount < minWithdraw) return sendError(res, `Minimum withdrawal is ${wallet.currency} ${minWithdraw}`, 400);
   if (wallet.balance < amount) return sendError(res, 'Insufficient balance', 400);
 
