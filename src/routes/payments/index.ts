@@ -24,6 +24,39 @@ const upload = multer({
 
 const router = Router();
 
+// ---------------------------------------------------------------------------
+// Currency-locking helpers
+// ---------------------------------------------------------------------------
+
+/** Return the correct wallet currency for a given country + deposit provider. */
+function determineCurrency(country: string, provider: string): string {
+  if (country === 'NG' && provider === 'ng_bank_transfer') return 'NGN';
+  if (country === 'GH' && ['momo_mtn', 'momo_telecel', 'momo_airteltigo'].includes(provider)) return 'GHS';
+  return 'USD';
+}
+
+/**
+ * If the wallet currency has not been locked yet, set it based on the first
+ * deposit's country + provider and lock it permanently.
+ */
+async function maybeLockWalletCurrency(userId: string, country: string, provider: string): Promise<void> {
+  const { data: wallet } = await supabase
+    .from('wallets').select('id, currency_locked').eq('user_id', userId).single();
+  if (!wallet || wallet.currency_locked) return;
+  const currency = determineCurrency(country, provider);
+  await supabase.from('wallets')
+    .update({ currency, currency_locked: true })
+    .eq('id', wallet.id);
+}
+
+/** Minimum wallet balance required before a withdrawal is allowed. */
+const WITHDRAWAL_MIN_BALANCE: Record<string, number> = { NGN: 30000, GHS: 600, USD: 30 };
+
+/** Minimum amount per individual withdrawal request. */
+const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
+
+// ---------------------------------------------------------------------------
+
 const paystackInitSchema = z.object({
   amount: z.number().min(10).max(100000),
   callback_url: z.string().url().optional(),
@@ -68,6 +101,13 @@ const withdrawSchema = z.object({
 
 const approveRejectSchema = z.object({
   notes: z.string().optional(),
+});
+
+// Extended schema for deposit approval — allows admin to specify the local-currency
+// equivalent when approving a USDT deposit for an NGN or GHS wallet.
+const approveDepositSchema = z.object({
+  notes: z.string().optional(),
+  credited_amount: z.number().positive().optional(),
 });
 
 // POST /payments/paystack/initialize
@@ -145,6 +185,19 @@ router.post('/paystack/webhook', asyncHandler(async (req, res) => {
 router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(manualMomoSchema), asyncHandler(async (req, res) => {
   const { amount, provider, phone_number, sender_name, transaction_id, screenshot_url } = req.body;
 
+  const { data: userRecord } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
+  if (userRecord?.country !== 'GH') {
+    return sendError(res, 'Mobile Money deposits are only available for Ghanaian users', 400);
+  }
+
+  // Check that a locked wallet (if any) is compatible with MoMo (GHS)
+  const { data: wallet } = await supabase.from('wallets').select('currency, currency_locked').eq('user_id', req.user!.id).single();
+  if (wallet?.currency_locked && wallet.currency !== 'GHS') {
+    return sendError(res, 'Mobile Money deposits are not supported for your wallet currency', 400);
+  }
+
+  await maybeLockWalletCurrency(req.user!.id, userRecord.country, provider);
+
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
     amount,
@@ -164,6 +217,19 @@ router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(m
 // POST /payments/ng-bank/deposit
 router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBankSchema), asyncHandler(async (req, res) => {
   const { amount, bank_name, account_name, reference, screenshot_url } = req.body;
+
+  const { data: userRecord } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
+  if (userRecord?.country !== 'NG') {
+    return sendError(res, 'Bank transfer deposits are only available for Nigerian users', 400);
+  }
+
+  // Check that a locked wallet (if any) is compatible with bank transfer (NGN)
+  const { data: wallet } = await supabase.from('wallets').select('currency, currency_locked').eq('user_id', req.user!.id).single();
+  if (wallet?.currency_locked && wallet.currency !== 'NGN') {
+    return sendError(res, 'Bank transfer deposits are not supported for your wallet currency', 400);
+  }
+
+  await maybeLockWalletCurrency(req.user!.id, userRecord.country, 'ng_bank_transfer');
 
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
@@ -185,6 +251,14 @@ router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBan
 router.post('/usdt-trc20/deposit', authenticate, paymentLimiter, validateBody(usdtSchema), asyncHandler(async (req, res) => {
   const { amount_usd, tx_hash } = req.body;
 
+  // Lock wallet to USD if this is the first deposit (crypto always → USD)
+  const { data: userRecord } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
+  await maybeLockWalletCurrency(req.user!.id, userRecord?.country ?? '', 'usdt_trc20');
+
+  // Fetch the now-current wallet currency so we can store the right target currency
+  const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', req.user!.id).single();
+  const walletCurrency = walletRow?.currency ?? 'USD';
+
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
     amount: amount_usd,
@@ -192,12 +266,14 @@ router.post('/usdt-trc20/deposit', authenticate, paymentLimiter, validateBody(us
     payment_provider: 'usdt_trc20',
     tx_hash,
     status: 'pending',
+    metadata: { wallet_currency: walletCurrency },
   });
   if (error) return sendError(res, 'Failed to record deposit request', 500);
 
   return sendSuccess(res, {
     message: 'Crypto deposit submitted. Awaiting blockchain verification.',
     wallet_address: env.CRYPTO_WALLET_ADDRESS,
+    wallet_currency: walletCurrency,
   }, 201);
 }));
 
@@ -315,7 +391,11 @@ router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSche
   const { data: wallet } = await supabase.from('wallets').select('*').eq('user_id', req.user!.id).single();
   if (!wallet) return sendError(res, 'Wallet not found', 404);
   if (wallet.frozen || wallet.withdrawal_frozen) return sendError(res, 'Withdrawals are frozen on your account', 403);
-  if (wallet.balance < 600) return sendError(res, 'A minimum balance of GHS 600 is required to make a withdrawal', 400);
+
+  const minBalance = WITHDRAWAL_MIN_BALANCE[wallet.currency] ?? 30;
+  const minWithdraw = WITHDRAWAL_MIN_AMOUNT[wallet.currency] ?? 10;
+  if (wallet.balance < minBalance) return sendError(res, `A minimum balance of ${wallet.currency} ${minBalance} is required to make a withdrawal`, 400);
+  if (amount < minWithdraw) return sendError(res, `Minimum withdrawal is ${wallet.currency} ${minWithdraw}`, 400);
   if (wallet.balance < amount) return sendError(res, 'Insufficient balance', 400);
 
   // Check responsible gambling limits
@@ -424,26 +504,37 @@ router.get('/admin/deposits', authenticate, requireAdmin, asyncHandler(async (re
 }));
 
 // POST /payments/admin/deposits/:id/approve
-router.post('/admin/deposits/:id/approve', authenticate, requireAdmin, validateBody(approveRejectSchema), asyncHandler(async (req, res) => {
+router.post('/admin/deposits/:id/approve', authenticate, requireAdmin, validateBody(approveDepositSchema), asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { notes } = req.body;
+  const { notes, credited_amount } = req.body;
 
   const { data: deposit, error } = await supabase
     .from('deposit_requests').select('*').eq('id', id).single();
   if (error || !deposit) return sendError(res, 'Deposit not found', 404);
   if (deposit.status !== 'pending') return sendError(res, 'Deposit already processed', 400);
 
+  // For USDT deposits going into NGN or GHS wallets, the admin must supply
+  // credited_amount (the local-currency equivalent). For USD wallets or direct
+  // fiat deposits the original deposit.amount is used as-is.
+  const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', deposit.user_id).single();
+  const walletCurrency = walletRow?.currency ?? deposit.currency;
+  const amountToCredit = credited_amount ?? deposit.amount;
+
+  if (deposit.payment_provider === 'usdt_trc20' && walletCurrency !== 'USD' && !credited_amount) {
+    return sendError(res, `Wallet currency is ${walletCurrency}. Provide credited_amount (the ${walletCurrency} equivalent of the USDT deposit) to approve.`, 400);
+  }
+
   await supabase.from('deposit_requests').update({
     status: 'approved', reviewed_by: req.user!.id,
     reviewed_at: new Date().toISOString(), notes,
   }).eq('id', id);
 
-  await WalletService.credit(deposit.user_id, deposit.amount, 'deposit', deposit.payment_provider, undefined, `${deposit.payment_provider} deposit approved`);
-  await NotificationService.send(deposit.user_id, 'deposit_approved', 'Deposit Approved', `Your deposit of ${deposit.currency} ${deposit.amount} has been approved and credited.`);
-  AffiliateService.creditCpaCommission(deposit.user_id, deposit.amount, deposit.currency).catch(() => {});
+  await WalletService.credit(deposit.user_id, amountToCredit, 'deposit', deposit.payment_provider, undefined, `${deposit.payment_provider} deposit approved`);
+  await NotificationService.send(deposit.user_id, 'deposit_approved', 'Deposit Approved', `Your deposit has been approved. ${walletCurrency} ${amountToCredit} has been credited to your account.`);
+  AffiliateService.creditCpaCommission(deposit.user_id, amountToCredit, walletCurrency).catch(() => {});
 
-  await AdminLogService.log(req.user!.id, 'approve_deposit', 'deposit_request', id, { amount: deposit.amount, provider: deposit.payment_provider });
-  await supabase.from('payment_audit_logs').insert({ entity_type: 'deposit_request', entity_id: id, action: 'approve', admin_id: req.user!.id, previous_status: 'pending', new_status: 'approved', amount: deposit.amount, notes });
+  await AdminLogService.log(req.user!.id, 'approve_deposit', 'deposit_request', id, { amount: amountToCredit, credited_amount, provider: deposit.payment_provider });
+  await supabase.from('payment_audit_logs').insert({ entity_type: 'deposit_request', entity_id: id, action: 'approve', admin_id: req.user!.id, previous_status: 'pending', new_status: 'approved', amount: amountToCredit, notes });
 
   return sendSuccess(res, { message: 'Deposit approved and wallet credited' });
 }));
