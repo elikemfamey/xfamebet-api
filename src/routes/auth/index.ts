@@ -357,11 +357,13 @@ router.post('/login', authLimiter, validateBody(loginSchema), async (req, res) =
       id: user.id,
       username: user.username,
       email: user.email,
+      phone: user.phone,
       role: user.role,
       kyc_status: user.kyc_status,
       account_status: user.account_status,
       two_fa_enabled: user.two_fa_enabled,
       country: user.country,
+      referral_code: user.referral_code,
     },
   });
 });
