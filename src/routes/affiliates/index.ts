@@ -135,6 +135,35 @@ router.get('/referrals', requireAffiliate, async (req, res) => {
   return sendPaginated(res, data ?? [], count ?? 0, page, limit);
 });
 
+// GET /affiliates/earnings-chart
+router.get('/earnings-chart', requireAffiliate, async (req, res) => {
+  const { data: affiliate } = await supabase.from('affiliates').select('id').eq('user_id', req.user!.id).single();
+  if (!affiliate) return sendError(res, 'Affiliate not found', 404);
+
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 3600000).toISOString();
+  const { data: logs } = await supabase.from('affiliate_commission_logs')
+    .select('created_at, commission_amount')
+    .eq('affiliate_id', affiliate.id)
+    .gte('created_at', ninetyDaysAgo)
+    .order('created_at', { ascending: true });
+
+  if (!logs || logs.length === 0) return sendSuccess(res, []);
+
+  const byDay: Record<string, number> = {};
+  for (const log of logs) {
+    const day = (log.created_at as string).slice(0, 10);
+    byDay[day] = (byDay[day] ?? 0) + (log.commission_amount as number);
+  }
+
+  let cumulative = 0;
+  const points = Object.entries(byDay).map(([date, amount]) => {
+    cumulative += amount;
+    return { date, amount: parseFloat(amount.toFixed(2)), cumulative: parseFloat(cumulative.toFixed(2)) };
+  });
+
+  return sendSuccess(res, points);
+});
+
 // POST /affiliates/generate-link
 router.post('/generate-link', requireAffiliate, validateBody(generateLinkSchema), async (req, res) => {
   const { campaign } = req.body;

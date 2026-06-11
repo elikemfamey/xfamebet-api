@@ -2,8 +2,8 @@ import { supabase } from '../config/supabase';
 
 // Approximate mid-market rates — kept in sync with admin/payments page
 const TO_USD: Record<string, number> = {
-  GHS: 1 / 11,
-  NGN: 1 / 1550,
+  GHS: 1 / 10,
+  NGN: 1 / 10,
   KES: 1 / 130,
   ZAR: 1 / 18.5,
   USDT: 1,

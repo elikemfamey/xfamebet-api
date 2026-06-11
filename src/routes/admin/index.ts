@@ -300,6 +300,34 @@ router.get('/affiliates', async (req, res) => {
   return sendPaginated(res, data ?? [], count ?? 0, page, limit);
 });
 
+// GET /admin/affiliates/payout-queue
+router.get('/affiliates/payout-queue', async (req, res) => {
+  const minBalance = parseFloat(req.query.min_balance as string) || 0;
+  const { data } = await supabase.from('affiliates')
+    .select('id, total_earnings, withdrawal_balance, commission_type, commission_rate, users(id, username, email, phone)')
+    .eq('approval_status', 'approved')
+    .gt('withdrawal_balance', minBalance)
+    .order('withdrawal_balance', { ascending: false });
+  return sendSuccess(res, data ?? []);
+});
+
+// POST /admin/affiliates/bulk-action
+router.post('/affiliates/bulk-action', validateBody(z.object({
+  ids: z.array(z.string()).min(1),
+  action: z.enum(['approve', 'block']),
+})), async (req, res) => {
+  const { ids, action } = req.body;
+  const status = action === 'approve' ? 'approved' : 'blocked';
+  await supabase.from('affiliates').update({ approval_status: status }).in('id', ids);
+  if (action === 'approve') {
+    const { data: affs } = await supabase.from('affiliates').select('user_id').in('id', ids);
+    const userIds = (affs ?? []).map(a => a.user_id);
+    if (userIds.length > 0) await supabase.from('users').update({ role: 'affiliate' }).in('id', userIds);
+  }
+  await AdminLogService.log(req.user!.id, `bulk_${action}_affiliate`, 'affiliates', ids.join(','), { count: ids.length });
+  return sendSuccess(res, { message: `${ids.length} affiliate(s) ${action}d` });
+});
+
 // GET /admin/affiliates/:id
 router.get('/affiliates/:id', async (req, res) => {
   const { id } = req.params;
@@ -552,6 +580,15 @@ router.post('/affiliates/:id/block', async (req, res) => {
   await supabase.from('affiliates').update({ approval_status: 'blocked' }).eq('id', req.params.id);
   await AdminLogService.log(req.user!.id, 'block_affiliate', 'affiliates', req.params.id, {});
   return sendSuccess(res, { message: 'Affiliate blocked' });
+});
+
+// PATCH /admin/affiliates/:id/notes
+router.patch('/affiliates/:id/notes', validateBody(z.object({
+  notes: z.string().max(2000),
+})), async (req, res) => {
+  await supabase.from('affiliates').update({ notes: req.body.notes }).eq('id', req.params.id);
+  await AdminLogService.log(req.user!.id, 'update_affiliate_notes', 'affiliates', req.params.id, {});
+  return sendSuccess(res, { message: 'Notes updated' });
 });
 
 // ==================== PROMOTIONS ====================
