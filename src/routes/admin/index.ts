@@ -11,6 +11,17 @@ import { NotificationService } from '../../services/notificationService';
 const router = Router();
 router.use(authenticate, requireAdmin);
 
+// Mid-market rates confirmed June 2026 — keep in sync with affiliateService.ts
+const TO_USD: Record<string, number> = {
+  GHS: 1 / 10,
+  NGN: 1 / 1000,
+  KES: 1 / 130,
+  ZAR: 1 / 18.5,
+  USDT: 1,
+  USD: 1,
+};
+const toUsd = (amount: number, currency: string) => amount * (TO_USD[currency] ?? 1);
+
 // ==================== USERS ====================
 
 // GET /admin/users
@@ -203,30 +214,50 @@ router.post('/fraud/reverse-bonus/:id', validateBody(z.object({ reason: z.string
 // ==================== ANALYTICS ====================
 
 // GET /admin/revenue
+// All monetary values returned in USD using per-currency conversion rates.
 router.get('/revenue', async (req, res) => {
   const from = req.query.from as string ?? new Date(Date.now() - 30 * 24 * 3600000).toISOString();
   const to = req.query.to as string ?? new Date().toISOString();
 
   const [betsResult, depositsResult, withdrawalsResult, usersResult] = await Promise.all([
-    supabase.from('bets').select('stake, payout, status').gte('placed_at', from).lte('placed_at', to),
-    supabase.from('deposit_requests').select('amount').eq('status', 'approved').gte('created_at', from).lte('created_at', to),
-    supabase.from('withdrawal_requests').select('amount').eq('status', 'approved').gte('created_at', from).lte('created_at', to),
+    supabase.from('bets').select('stake, payout, status, user_id').gte('placed_at', from).lte('placed_at', to),
+    supabase.from('deposit_requests').select('amount, currency').eq('status', 'approved').gte('created_at', from).lte('created_at', to),
+    supabase.from('withdrawal_requests').select('amount, currency').eq('status', 'approved').gte('created_at', from).lte('created_at', to),
     supabase.from('users').select('id', { count: 'exact' }).gte('created_at', from).lte('created_at', to),
   ]);
 
-  const totalBetVolume = betsResult.data?.reduce((s, b) => s + b.stake, 0) ?? 0;
-  const totalWinnings = betsResult.data?.filter(b => b.status === 'won').reduce((s, b) => s + b.payout, 0) ?? 0;
-  const grossRevenue = totalBetVolume - totalWinnings;
-  const totalDeposits = depositsResult.data?.reduce((s, d) => s + d.amount, 0) ?? 0;
-  const totalWithdrawals = withdrawalsResult.data?.reduce((s, w) => s + w.amount, 0) ?? 0;
+  // Fetch wallet currencies for all users who placed bets so we can convert correctly
+  const betUserIds = [...new Set((betsResult.data ?? []).map(b => b.user_id as string))];
+  const walletCurrencyMap = new Map<string, string>();
+  if (betUserIds.length > 0) {
+    const { data: wallets } = await supabase.from('wallets').select('user_id, currency').in('user_id', betUserIds);
+    (wallets ?? []).forEach(w => walletCurrencyMap.set(w.user_id as string, w.currency as string));
+  }
+
+  const bets = betsResult.data ?? [];
+  const totalBetVolumeUsd = parseFloat(
+    bets.reduce((s, b) => s + toUsd(b.stake as number, walletCurrencyMap.get(b.user_id as string) ?? 'GHS'), 0).toFixed(2),
+  );
+  const totalWinningsUsd = parseFloat(
+    bets.filter(b => b.status === 'won')
+      .reduce((s, b) => s + toUsd(b.payout as number, walletCurrencyMap.get(b.user_id as string) ?? 'GHS'), 0).toFixed(2),
+  );
+  const grossRevenueUsd = parseFloat((totalBetVolumeUsd - totalWinningsUsd).toFixed(2));
+
+  const totalDepositsUsd = parseFloat(
+    (depositsResult.data ?? []).reduce((s, d) => s + toUsd(d.amount as number, (d.currency as string) ?? 'GHS'), 0).toFixed(2),
+  );
+  const totalWithdrawalsUsd = parseFloat(
+    (withdrawalsResult.data ?? []).reduce((s, w) => s + toUsd(w.amount as number, (w.currency as string) ?? 'USD'), 0).toFixed(2),
+  );
 
   return sendSuccess(res, {
     period: { from, to },
-    bets: { total_volume: totalBetVolume, total_winnings: totalWinnings, gross_revenue: grossRevenue, count: betsResult.data?.length ?? 0 },
-    deposits: { total: totalDeposits, count: depositsResult.data?.length ?? 0 },
-    withdrawals: { total: totalWithdrawals, count: withdrawalsResult.data?.length ?? 0 },
+    bets: { total_volume: totalBetVolumeUsd, total_winnings: totalWinningsUsd, gross_revenue: grossRevenueUsd, count: bets.length },
+    deposits: { total: totalDepositsUsd, count: depositsResult.data?.length ?? 0 },
+    withdrawals: { total: totalWithdrawalsUsd, count: withdrawalsResult.data?.length ?? 0 },
     new_users: usersResult.count ?? 0,
-    net_revenue: grossRevenue - totalWithdrawals,
+    net_revenue: parseFloat((grossRevenueUsd - totalWithdrawalsUsd).toFixed(2)),
   });
 });
 
