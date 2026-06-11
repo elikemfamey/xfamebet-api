@@ -186,17 +186,15 @@ router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(m
   const { amount, provider, phone_number, sender_name, transaction_id, screenshot_url } = req.body;
 
   const { data: userRecord } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
-  if (userRecord?.country !== 'GH') {
-    return sendError(res, 'Mobile Money deposits are only available for Ghanaian users', 400);
-  }
 
-  // Check that a locked wallet (if any) is compatible with MoMo (GHS)
-  const { data: wallet } = await supabase.from('wallets').select('currency, currency_locked').eq('user_id', req.user!.id).single();
-  if (wallet?.currency_locked && wallet.currency !== 'GHS') {
-    return sendError(res, 'Mobile Money deposits are not supported for your wallet currency', 400);
-  }
+  // Lock wallet on first deposit. For a user whose wallet is already locked to a
+  // different currency (e.g. NGN), the deposit is still accepted; the admin enters
+  // the credited_amount (wallet-currency equivalent) at approval time.
+  await maybeLockWalletCurrency(req.user!.id, userRecord?.country ?? '', provider);
 
-  await maybeLockWalletCurrency(req.user!.id, userRecord.country, provider);
+  // Store what target currency this deposit should be credited in so the admin sees it
+  const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', req.user!.id).single();
+  const walletCurrency = walletRow?.currency ?? 'GHS';
 
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
@@ -208,6 +206,7 @@ router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(m
     account_number: phone_number || null,
     account_name: sender_name,
     status: 'pending',
+    metadata: { wallet_currency: walletCurrency },
   });
   if (error) return sendError(res, 'Failed to record deposit request', 500);
 
@@ -219,17 +218,14 @@ router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBan
   const { amount, bank_name, account_name, reference, screenshot_url } = req.body;
 
   const { data: userRecord } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
-  if (userRecord?.country !== 'NG') {
-    return sendError(res, 'Bank transfer deposits are only available for Nigerian users', 400);
-  }
 
-  // Check that a locked wallet (if any) is compatible with bank transfer (NGN)
-  const { data: wallet } = await supabase.from('wallets').select('currency, currency_locked').eq('user_id', req.user!.id).single();
-  if (wallet?.currency_locked && wallet.currency !== 'NGN') {
-    return sendError(res, 'Bank transfer deposits are not supported for your wallet currency', 400);
-  }
+  // Lock wallet on first deposit. If the wallet is already locked to a different
+  // currency, the deposit is still accepted; admin enters credited_amount at approval.
+  await maybeLockWalletCurrency(req.user!.id, userRecord?.country ?? '', 'ng_bank_transfer');
 
-  await maybeLockWalletCurrency(req.user!.id, userRecord.country, 'ng_bank_transfer');
+  // Store target wallet currency so the admin sees what conversion is needed
+  const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', req.user!.id).single();
+  const walletCurrency = walletRow?.currency ?? 'NGN';
 
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id,
@@ -241,6 +237,7 @@ router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBan
     bank_name,
     account_name,
     status: 'pending',
+    metadata: { wallet_currency: walletCurrency },
   });
   if (error) return sendError(res, 'Failed to record deposit request', 500);
 
@@ -520,8 +517,13 @@ router.post('/admin/deposits/:id/approve', authenticate, requireAdmin, validateB
   const walletCurrency = walletRow?.currency ?? deposit.currency;
   const amountToCredit = credited_amount ?? deposit.amount;
 
-  if (deposit.payment_provider === 'usdt_trc20' && walletCurrency !== 'USD' && !credited_amount) {
-    return sendError(res, `Wallet currency is ${walletCurrency}. Provide credited_amount (the ${walletCurrency} equivalent of the USDT deposit) to approve.`, 400);
+  // If deposit currency differs from wallet currency a conversion is required.
+  // The admin must supply credited_amount (the wallet-currency equivalent).
+  const depositCurrencyMatchesWallet =
+    deposit.currency === walletCurrency ||
+    (deposit.currency === 'USDT' && walletCurrency === 'USD');
+  if (!depositCurrencyMatchesWallet && !credited_amount) {
+    return sendError(res, `Deposit is in ${deposit.currency} but wallet is ${walletCurrency}. Provide credited_amount (the ${walletCurrency} equivalent) to approve.`, 400);
   }
 
   await supabase.from('deposit_requests').update({
