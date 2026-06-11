@@ -300,6 +300,229 @@ router.get('/affiliates', async (req, res) => {
   return sendPaginated(res, data ?? [], count ?? 0, page, limit);
 });
 
+// GET /admin/affiliates/:id
+router.get('/affiliates/:id', async (req, res) => {
+  const { id } = req.params;
+
+  const { data: aff } = await supabase.from('affiliates')
+    .select('*, users(id, username, email, phone, referral_code)')
+    .eq('id', id).single();
+
+  if (!aff) return sendError(res, 'Affiliate not found', 404);
+
+  const { data: referrals } = await supabase.from('affiliate_referrals')
+    .select('referred_user_id, deposit_total, betting_volume, commission_earned')
+    .eq('affiliate_id', id);
+
+  const referredUserIds = (referrals ?? []).map(r => r.referred_user_id);
+  const totalReferred = referredUserIds.length;
+  const depositedUsers = (referrals ?? []).filter(r => r.deposit_total > 0).length;
+  const totalDeposits = (referrals ?? []).reduce((s, r) => s + r.deposit_total, 0);
+  const totalBetVolume = (referrals ?? []).reduce((s, r) => s + r.betting_volume, 0);
+
+  const [{ count: totalClicks }, { count: convertedClicks }] = await Promise.all([
+    supabase.from('affiliate_clicks').select('id', { count: 'exact' }).eq('affiliate_id', id),
+    supabase.from('affiliate_clicks').select('id', { count: 'exact' }).eq('affiliate_id', id).eq('converted', true),
+  ]);
+
+  let totalBetsPlaced = 0;
+  let revenueGenerated = 0;
+  let totalWithdrawals = 0;
+  let activeUsers30d = 0;
+
+  if (referredUserIds.length > 0) {
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600000).toISOString();
+    const [betsRes, withdrawalsRes, activeBetsRes] = await Promise.all([
+      supabase.from('bets').select('stake, payout, status').in('user_id', referredUserIds),
+      supabase.from('withdrawal_requests').select('amount').eq('status', 'approved').in('user_id', referredUserIds),
+      supabase.from('bets').select('user_id').in('user_id', referredUserIds).gte('placed_at', thirtyDaysAgo),
+    ]);
+
+    const bets = betsRes.data ?? [];
+    totalBetsPlaced = bets.length;
+    const totalStake = bets.reduce((s: number, b: Record<string, unknown>) => s + (b.stake as number), 0);
+    const totalWon = bets.filter((b: Record<string, unknown>) => b.status === 'won').reduce((s: number, b: Record<string, unknown>) => s + (b.payout as number), 0);
+    revenueGenerated = totalStake - totalWon;
+    totalWithdrawals = (withdrawalsRes.data ?? []).reduce((s: number, w: Record<string, unknown>) => s + (w.amount as number), 0);
+    activeUsers30d = new Set((activeBetsRes.data ?? []).map((b: Record<string, unknown>) => b.user_id as string)).size;
+  }
+
+  const user = aff.users as unknown as { id: string; username: string; email?: string; phone?: string; referral_code: string };
+  const baseUrl = ((process.env.FRONTEND_URL ?? 'https://xfamebet.com') as string).split(',')[0].trim();
+  const totalPaidOut = (aff.total_earnings ?? 0) - (aff.withdrawal_balance ?? 0);
+  const avgDepositPerUser = depositedUsers > 0 ? totalDeposits / depositedUsers : 0;
+
+  return sendSuccess(res, {
+    ...aff,
+    users: { id: user.id, username: user.username, email: user.email, phone: user.phone },
+    total_paid_out: parseFloat(totalPaidOut.toFixed(2)),
+    referral_code: user.referral_code,
+    referral_link: `${baseUrl}/register?ref=${user.referral_code}`,
+    metrics: {
+      total_referred: totalReferred,
+      deposited_users: depositedUsers,
+      active_users_30d: activeUsers30d,
+      conversion_rate: totalReferred > 0 ? parseFloat(((depositedUsers / totalReferred) * 100).toFixed(1)) : 0,
+      avg_deposit_per_user: parseFloat(avgDepositPerUser.toFixed(2)),
+      total_deposits: parseFloat(totalDeposits.toFixed(2)),
+      total_bet_volume: parseFloat(totalBetVolume.toFixed(2)),
+      total_withdrawals: parseFloat(totalWithdrawals.toFixed(2)),
+      total_bets_placed: totalBetsPlaced,
+      revenue_generated: parseFloat(revenueGenerated.toFixed(2)),
+      clicks: totalClicks ?? 0,
+      click_to_reg_rate: (totalClicks ?? 0) > 0
+        ? parseFloat(((totalReferred / (totalClicks ?? 1)) * 100).toFixed(1))
+        : 0,
+    },
+  });
+});
+
+// GET /admin/affiliates/:id/users
+router.get('/affiliates/:id/users', async (req, res) => {
+  const { id } = req.params;
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = 20;
+  const offset = (page - 1) * limit;
+  const search = (req.query.search as string) ?? '';
+  const sortBy = (req.query.sort_by as string) || 'total_deposits';
+  const sortDir = (req.query.sort_dir as string) || 'desc';
+
+  const { data: referrals } = await supabase.from('affiliate_referrals')
+    .select('referred_user_id, deposit_total, betting_volume, commission_earned')
+    .eq('affiliate_id', id);
+
+  if (!referrals || referrals.length === 0) return sendPaginated(res, [], 0, page, limit);
+
+  const referralMap = Object.fromEntries(referrals.map(r => [r.referred_user_id, r]));
+  const userIds = referrals.map(r => r.referred_user_id);
+
+  let userQuery = supabase.from('users')
+    .select('id, username, email, phone, created_at, kyc_status, last_login_at')
+    .in('id', userIds);
+
+  if (search) userQuery = userQuery.or(`username.ilike.%${search}%,phone.ilike.%${search}%`);
+
+  const { data: users } = await userQuery;
+  if (!users || users.length === 0) return sendPaginated(res, [], 0, page, limit);
+
+  const filteredIds = users.map(u => u.id);
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 3600000).toISOString();
+
+  const [walletsRes, betsRes, firstDepositsRes, withdrawalsRes] = await Promise.all([
+    supabase.from('wallets').select('user_id, balance').in('user_id', filteredIds),
+    supabase.from('bets').select('user_id, stake, placed_at').in('user_id', filteredIds),
+    supabase.from('deposit_requests').select('user_id, created_at').eq('status', 'approved').in('user_id', filteredIds).order('created_at', { ascending: true }),
+    supabase.from('withdrawal_requests').select('user_id, amount').eq('status', 'approved').in('user_id', filteredIds),
+  ]);
+
+  const walletMap: Record<string, number> = {};
+  for (const w of walletsRes.data ?? []) walletMap[(w as Record<string, unknown>).user_id as string] = (w as Record<string, unknown>).balance as number;
+
+  const betsByUser: Record<string, { count: number; lastAt?: string }> = {};
+  for (const b of betsRes.data ?? []) {
+    const bet = b as Record<string, unknown>;
+    const uid = bet.user_id as string;
+    if (!betsByUser[uid]) betsByUser[uid] = { count: 0 };
+    betsByUser[uid].count++;
+    if (!betsByUser[uid].lastAt || (bet.placed_at as string) > betsByUser[uid].lastAt!) {
+      betsByUser[uid].lastAt = bet.placed_at as string;
+    }
+  }
+
+  const firstDepositMap: Record<string, string> = {};
+  for (const d of firstDepositsRes.data ?? []) {
+    const dep = d as Record<string, unknown>;
+    const uid = dep.user_id as string;
+    if (!firstDepositMap[uid]) firstDepositMap[uid] = dep.created_at as string;
+  }
+
+  const withdrawalMap: Record<string, number> = {};
+  for (const w of withdrawalsRes.data ?? []) {
+    const wd = w as Record<string, unknown>;
+    const uid = wd.user_id as string;
+    withdrawalMap[uid] = (withdrawalMap[uid] ?? 0) + (wd.amount as number);
+  }
+
+  const rows = users.map(u => {
+    const ref = referralMap[u.id];
+    const bets = betsByUser[u.id] ?? { count: 0 };
+    const lastBet = bets.lastAt;
+    const lastActive = lastBet && (!u.last_login_at || lastBet > u.last_login_at) ? lastBet : u.last_login_at;
+    const isActive = lastBet ? new Date(lastBet) > new Date(thirtyDaysAgo) : false;
+    return {
+      id: u.id, username: u.username, email: u.email, phone: u.phone,
+      created_at: u.created_at, first_deposit_at: firstDepositMap[u.id] ?? null,
+      total_deposits: ref?.deposit_total ?? 0,
+      total_withdrawals: withdrawalMap[u.id] ?? 0,
+      total_bets: bets.count,
+      total_bet_volume: ref?.betting_volume ?? 0,
+      wallet_balance: walletMap[u.id] ?? 0,
+      kyc_status: u.kyc_status, is_active: isActive,
+      last_active: lastActive ?? null,
+      commission_earned: ref?.commission_earned ?? 0,
+    };
+  });
+
+  rows.sort((a, b) => {
+    let av = 0, bv = 0;
+    if (sortBy === 'total_deposits') { av = a.total_deposits; bv = b.total_deposits; }
+    else if (sortBy === 'total_bets') { av = a.total_bets; bv = b.total_bets; }
+    else { av = new Date(a.created_at).getTime(); bv = new Date(b.created_at).getTime(); }
+    return sortDir === 'asc' ? av - bv : bv - av;
+  });
+
+  return sendPaginated(res, rows.slice(offset, offset + limit), rows.length, page, limit);
+});
+
+// GET /admin/affiliates/:id/earnings
+router.get('/affiliates/:id/earnings', async (req, res) => {
+  const { id } = req.params;
+
+  const { data: logs } = await supabase.from('affiliate_commission_logs')
+    .select('created_at, commission_amount')
+    .eq('affiliate_id', id)
+    .order('created_at', { ascending: true });
+
+  if (!logs || logs.length === 0) return sendSuccess(res, []);
+
+  const byDay: Record<string, number> = {};
+  for (const log of logs) {
+    const day = (log.created_at as string).slice(0, 10);
+    byDay[day] = (byDay[day] ?? 0) + (log.commission_amount as number);
+  }
+
+  let cumulative = 0;
+  const points = Object.entries(byDay).map(([date, amount]) => {
+    cumulative += amount;
+    return { date, amount: parseFloat(amount.toFixed(2)), cumulative: parseFloat(cumulative.toFixed(2)) };
+  });
+
+  return sendSuccess(res, points);
+});
+
+// POST /admin/affiliates/:id/payout
+router.post('/affiliates/:id/payout', validateBody(z.object({
+  amount: z.number().positive(),
+  notes: z.string().optional(),
+})), async (req, res) => {
+  const { id } = req.params;
+  const { amount, notes } = req.body;
+
+  const { data: aff } = await supabase.from('affiliates')
+    .select('withdrawal_balance').eq('id', id).single();
+
+  if (!aff) return sendError(res, 'Affiliate not found', 404);
+  if (aff.withdrawal_balance < amount) return sendError(res, 'Amount exceeds balance owed', 400);
+
+  await supabase.from('affiliates')
+    .update({ withdrawal_balance: aff.withdrawal_balance - amount })
+    .eq('id', id);
+
+  await AdminLogService.log(req.user!.id, 'payout_affiliate', 'affiliates', id, { amount, notes });
+
+  return sendSuccess(res, { message: 'Payout recorded' });
+});
+
 // POST /admin/affiliates/:id/approve
 router.post('/affiliates/:id/approve', async (req, res) => {
   const { id } = req.params;
