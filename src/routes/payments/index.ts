@@ -50,7 +50,7 @@ async function maybeLockWalletCurrency(userId: string, country: string, provider
 }
 
 /** Minimum wallet balance required before a withdrawal is allowed. */
-const WITHDRAWAL_MIN_BALANCE: Record<string, number> = { NGN: 30000, GHS: 600, USD: 30 };
+const WITHDRAWAL_MIN_BALANCE: Record<string, number> = { NGN: 30000, GHS: 300, USD: 30 };
 
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
