@@ -113,6 +113,58 @@ router.post('/users/:id/revoke-sessions', async (req, res) => {
   return sendSuccess(res, { message: 'All sessions revoked' });
 });
 
+// GET /admin/users/:id/bets
+router.get('/users/:id/bets', async (req, res) => {
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = 20;
+  const offset = (page - 1) * limit;
+  const { data, count } = await supabase.from('bets')
+    .select('id, stake, payout, status, odds, selections, placed_at, settled_at', { count: 'exact' })
+    .eq('user_id', req.params.id)
+    .order('placed_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+  return sendPaginated(res, data ?? [], count ?? 0, page, limit);
+});
+
+// GET /admin/users/:id/transactions
+router.get('/users/:id/transactions', async (req, res) => {
+  const [depositsRes, withdrawalsRes] = await Promise.all([
+    supabase.from('deposit_requests')
+      .select('id, amount, currency, payment_provider, reference, transaction_id, tx_hash, status, notes, reviewed_at, created_at')
+      .eq('user_id', req.params.id)
+      .order('created_at', { ascending: false })
+      .limit(50),
+    supabase.from('withdrawal_requests')
+      .select('id, amount, currency, payment_provider, account_details, status, notes, payout_reference, reviewed_at, created_at')
+      .eq('user_id', req.params.id)
+      .order('created_at', { ascending: false })
+      .limit(50),
+  ]);
+  return sendSuccess(res, {
+    deposits: depositsRes.data ?? [],
+    withdrawals: withdrawalsRes.data ?? [],
+  });
+});
+
+// GET /admin/users/:id/sessions
+router.get('/users/:id/sessions', async (req, res) => {
+  const { data } = await supabase.from('sessions')
+    .select('id, ip_address, user_agent, created_at, last_used_at, revoked_at')
+    .eq('user_id', req.params.id)
+    .order('created_at', { ascending: false })
+    .limit(20);
+  return sendSuccess(res, data ?? []);
+});
+
+// GET /admin/users/:id/kyc
+router.get('/users/:id/kyc', async (req, res) => {
+  const { data } = await supabase.from('kyc_documents')
+    .select('*')
+    .eq('user_id', req.params.id)
+    .order('created_at', { ascending: false });
+  return sendSuccess(res, data ?? []);
+});
+
 // ==================== KYC ====================
 
 // GET /admin/kyc/pending
