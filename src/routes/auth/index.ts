@@ -361,6 +361,7 @@ router.post('/login', authLimiter, validateBody(loginSchema), async (req, res) =
       kyc_status: user.kyc_status,
       account_status: user.account_status,
       two_fa_enabled: user.two_fa_enabled,
+      country: user.country,
     },
   });
 });

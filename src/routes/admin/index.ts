@@ -329,7 +329,7 @@ router.get('/affiliates/stats', async (_req, res) => {
     supabase.from('affiliate_referrals').select('id', { count: 'exact' }),
     // Top 5 affiliates by total earnings
     supabase.from('affiliates')
-      .select('id, total_earnings, withdrawal_balance, commission_type, commission_rate, users(username)')
+      .select('id, user_id, total_earnings, withdrawal_balance, commission_type, commission_rate, users(username)')
       .eq('approval_status', 'approved')
       .order('total_earnings', { ascending: false })
       .limit(5),
@@ -356,6 +356,7 @@ router.get('/affiliates/stats', async (_req, res) => {
     },
     top_affiliates: (topRows ?? []).map(a => ({
       id: a.id,
+      user_id: a.user_id,
       username: (a.users as unknown as { username: string })?.username ?? 'Unknown',
       total_earnings: a.total_earnings,
       withdrawal_balance: a.withdrawal_balance,
