@@ -297,6 +297,12 @@ function broadcastMatchState(state: MatchState, status: string) {
       fouls: state.fouls,
       corners: state.corners,
     });
+    io.to(`match:${state.id}`).emit(`match:${state.id}:timer`, { timer: status });
+    const matchStatus = status === 'HT' ? 'halftime'
+      : /^\d+\+\d+$/.test(status) ? 'injury_time'
+      : state.phase === 'second_half' ? 'second_half'
+      : 'live';
+    io.to(`match:${state.id}`).emit(`match:${state.id}:status`, { status: matchStatus });
   } catch {}
 }
 
@@ -360,7 +366,12 @@ async function handleScriptedFulltime(matchId: string, state: MatchState) {
     redis.del('live_feed:'),
     redis.del(`live_feed:${state.sport}`),
   ]);
-  try { getIO().emit('simulation:completed', { matchId, result, scoreA: state.scoreA, scoreB: state.scoreB }); } catch {}
+  try {
+    const io = getIO();
+    io.emit('simulation:completed', { matchId, result, scoreA: state.scoreA, scoreB: state.scoreB });
+    io.to(`match:${matchId}`).emit(`match:${matchId}:timer`, { timer: 'FT' });
+    io.to(`match:${matchId}`).emit(`match:${matchId}:status`, { status: 'fulltime' });
+  } catch {}
 
   await settleBets(matchId, result, state.scoreA, state.scoreB);
   matchStates.delete(matchId);
