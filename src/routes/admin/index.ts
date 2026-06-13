@@ -7,6 +7,7 @@ import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { AdminLogService } from '../../services/adminLogService';
 import { WalletService } from '../../services/walletService';
 import { NotificationService } from '../../services/notificationService';
+import { AffiliateService } from '../../services/affiliateService';
 
 const router = Router();
 router.use(authenticate, requireAdmin);
@@ -673,6 +674,22 @@ router.patch('/affiliates/:id/notes', validateBody(z.object({
   await supabase.from('affiliates').update({ notes: req.body.notes }).eq('id', req.params.id);
   await AdminLogService.log(req.user!.id, 'update_affiliate_notes', 'affiliates', req.params.id, {});
   return sendSuccess(res, { message: 'Notes updated' });
+});
+
+// POST /admin/affiliates/referrals/:userId/recalculate-commission
+// Reconciles commission_earned against actual commission logs and corrects affiliate totals.
+router.post('/affiliates/referrals/:userId/recalculate-commission', async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const result = await AffiliateService.recalculateCommission(userId);
+    await AdminLogService.log(req.user!.id, 'recalculate_commission', 'affiliate_referrals', userId, result);
+    return sendSuccess(res, {
+      message: `Commission recalculated: ${result.old} → ${result.new} (diff: ${result.diff})`,
+      ...result,
+    });
+  } catch (err: unknown) {
+    return sendError(res, (err as Error).message ?? 'Recalculation failed', 400);
+  }
 });
 
 // ==================== PROMOTIONS ====================

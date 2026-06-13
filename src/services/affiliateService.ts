@@ -86,13 +86,12 @@ export class AffiliateService {
 
     if (!referral) return;
 
-    // Find the most recent commission log for this exact deposit amount/currency to identify the duplicate
+    // Find the most recent deposit-type commission log for this user to identify the duplicate
     const { data: commLogs } = await supabase
       .from('affiliate_commission_logs')
       .select('id, commission_amount')
       .eq('referred_user_id', userId)
-      .eq('source_amount', creditedAmount)
-      .eq('source_currency', walletCurrency)
+      .in('event_type', ['deposit_cpa', 'deposit_rev_share', 'deposit_hybrid'])
       .order('created_at', { ascending: false })
       .limit(1);
 
@@ -126,6 +125,53 @@ export class AffiliateService {
 
       await supabase.from('affiliate_commission_logs').delete().eq('id', dupLog.id);
     }
+  }
+
+  // Recomputes commission_earned from actual commission logs and fixes affiliate totals accordingly.
+  // Returns the old and new commission_earned so the caller can log the adjustment.
+  static async recalculateCommission(userId: string): Promise<{ old: number; new: number; diff: number }> {
+    const { data: referral } = await supabase
+      .from('affiliate_referrals')
+      .select('id, affiliate_id, commission_earned')
+      .eq('referred_user_id', userId)
+      .single();
+
+    if (!referral) throw new Error('No referral record found for this user');
+
+    const { data: logs } = await supabase
+      .from('affiliate_commission_logs')
+      .select('commission_amount')
+      .eq('referred_user_id', userId);
+
+    const trueCommission = parseFloat(
+      (logs ?? []).reduce((sum, l) => sum + (l.commission_amount as number), 0).toFixed(2),
+    );
+    const diff = parseFloat((trueCommission - referral.commission_earned).toFixed(2));
+
+    await supabase
+      .from('affiliate_referrals')
+      .update({ commission_earned: trueCommission })
+      .eq('id', referral.id);
+
+    if (diff !== 0) {
+      const { data: aff } = await supabase
+        .from('affiliates')
+        .select('total_earnings, withdrawal_balance')
+        .eq('id', referral.affiliate_id)
+        .single();
+
+      if (aff) {
+        await supabase
+          .from('affiliates')
+          .update({
+            total_earnings: Math.max(0, parseFloat((aff.total_earnings + diff).toFixed(2))),
+            withdrawal_balance: Math.max(0, parseFloat((aff.withdrawal_balance + diff).toFixed(2))),
+          })
+          .eq('id', referral.affiliate_id);
+      }
+    }
+
+    return { old: referral.commission_earned, new: trueCommission, diff };
   }
 
   static async creditCpaCommission(userId: string, depositAmount: number, depositCurrency = 'GHS'): Promise<void> {
