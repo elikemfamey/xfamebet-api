@@ -696,4 +696,44 @@ router.post('/admin/withdrawals/:id/reject', authenticate, requireAdmin, validat
   return sendSuccess(res, { message: 'Withdrawal rejected and funds returned' });
 }));
 
+// POST /payments/admin/withdrawals/:id/reverse
+router.post('/admin/withdrawals/:id/reverse', authenticate, requireAdmin, validateBody(z.object({ notes: z.string().optional() })), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { notes } = req.body;
+
+  const { data: withdrawal } = await supabase.from('withdrawal_requests').select('*').eq('id', id).single();
+  if (!withdrawal) return sendError(res, 'Withdrawal not found', 404);
+  if (withdrawal.status !== 'approved') return sendError(res, 'Only approved withdrawals can be reversed', 400);
+
+  await supabase.from('withdrawal_requests').update({ status: 'rejected', reviewed_by: req.user!.id, reviewed_at: new Date().toISOString(), notes: notes ?? 'Approval reversed by admin' }).eq('id', id);
+
+  const isAffiliateWithdrawal = (withdrawal.account_details as Record<string, unknown>)?.type === 'affiliate_earnings';
+  if (isAffiliateWithdrawal) {
+    const { data: affiliate } = await supabase.from('affiliates').select('id, withdrawal_balance').eq('user_id', withdrawal.user_id).single();
+    if (affiliate) {
+      await supabase.from('affiliates')
+        .update({ withdrawal_balance: affiliate.withdrawal_balance + withdrawal.amount })
+        .eq('id', affiliate.id);
+    }
+  } else {
+    await WalletService.credit(withdrawal.user_id, withdrawal.amount, 'refund', undefined, undefined, 'Withdrawal approval reversed - funds returned');
+  }
+
+  await supabase.from('payment_audit_logs').insert({
+    entity_type: 'withdrawal_request',
+    entity_id: id,
+    action: 'reverse',
+    admin_id: req.user!.id,
+    previous_status: 'approved',
+    new_status: 'rejected',
+    amount: withdrawal.amount,
+    notes: notes ?? 'Approval reversed by admin',
+  });
+
+  await NotificationService.send(withdrawal.user_id, 'withdrawal_rejected', 'Withdrawal Reversed', `Your approved withdrawal of ${withdrawal.currency} ${withdrawal.amount} has been reversed. Funds have been returned to your account.`);
+  await AdminLogService.log(req.user!.id, 'reverse_withdrawal', 'withdrawal_request', id, { amount: withdrawal.amount, notes });
+
+  return sendSuccess(res, { message: 'Withdrawal approval reversed and funds returned' });
+}));
+
 export default router;
