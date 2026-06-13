@@ -552,6 +552,63 @@ router.post('/admin/deposits/:id/reject', authenticate, requireAdmin, validateBo
   return sendSuccess(res, { message: 'Deposit rejected' });
 }));
 
+// POST /payments/admin/deposits/:id/reverse
+// Reverses an already-approved deposit: debits the wallet, corrects affiliate commission totals,
+// and marks the deposit as rejected. Use when a duplicate receipt was mistakenly approved.
+router.post('/admin/deposits/:id/reverse', authenticate, requireAdmin, validateBody(approveRejectSchema), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { notes } = req.body;
+
+  const { data: deposit, error } = await supabase
+    .from('deposit_requests').select('*').eq('id', id).single();
+  if (error || !deposit) return sendError(res, 'Deposit not found', 404);
+  if (deposit.status !== 'approved') return sendError(res, 'Only approved deposits can be reversed', 400);
+
+  // Get the amount that was actually credited (stored in audit log at approval time)
+  const { data: auditLog } = await supabase
+    .from('payment_audit_logs')
+    .select('amount')
+    .eq('entity_id', id)
+    .eq('action', 'approve')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  const { data: walletRow } = await supabase
+    .from('wallets').select('currency, balance').eq('user_id', deposit.user_id).single();
+  const walletCurrency = walletRow?.currency ?? deposit.currency;
+  const creditedAmount = auditLog?.amount ?? deposit.amount;
+
+  if (!walletRow || walletRow.balance < creditedAmount) {
+    return sendError(res, `Cannot reverse: user balance (${walletRow?.balance ?? 0} ${walletCurrency}) is less than the credited amount (${creditedAmount}). Funds may already be spent.`, 400);
+  }
+
+  await WalletService.debit(deposit.user_id, creditedAmount, 'adjustment', `Deposit reversed - duplicate receipt (${id})`);
+  await AffiliateService.reverseDepositApproval(deposit.user_id, creditedAmount, walletCurrency).catch(() => {});
+
+  await supabase.from('deposit_requests').update({
+    status: 'rejected',
+    reviewed_by: req.user!.id,
+    reviewed_at: new Date().toISOString(),
+    notes: notes ?? 'Reversed: duplicate receipt was mistakenly approved',
+  }).eq('id', id);
+
+  await NotificationService.send(deposit.user_id, 'system', 'Deposit Reversed', `A duplicate deposit of ${walletCurrency} ${creditedAmount} has been reversed from your account. Only one payment was accepted.`);
+  await AdminLogService.log(req.user!.id, 'reverse_deposit', 'deposit_request', id, { amount: creditedAmount, walletCurrency, notes });
+  await supabase.from('payment_audit_logs').insert({
+    entity_type: 'deposit_request',
+    entity_id: id,
+    action: 'reverse',
+    admin_id: req.user!.id,
+    previous_status: 'approved',
+    new_status: 'rejected',
+    amount: creditedAmount,
+    notes: notes ?? 'Reversed: duplicate receipt',
+  });
+
+  return sendSuccess(res, { message: 'Deposit reversed, wallet debited, and affiliate commission corrected' });
+}));
+
 // GET /payments/admin/withdrawals
 router.get('/admin/withdrawals', authenticate, requireAdmin, asyncHandler(async (req, res) => {
   const page = parseInt(req.query.page as string) || 1;

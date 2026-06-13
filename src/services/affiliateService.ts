@@ -75,6 +75,59 @@ export class AffiliateService {
     });
   }
 
+  static async reverseDepositApproval(userId: string, creditedAmount: number, walletCurrency: string): Promise<void> {
+    const depositUsd = toUsd(creditedAmount, walletCurrency);
+
+    const { data: referral } = await supabase
+      .from('affiliate_referrals')
+      .select('id, affiliate_id, deposit_total, commission_earned')
+      .eq('referred_user_id', userId)
+      .single();
+
+    if (!referral) return;
+
+    // Find the most recent commission log for this exact deposit amount/currency to identify the duplicate
+    const { data: commLogs } = await supabase
+      .from('affiliate_commission_logs')
+      .select('id, commission_amount')
+      .eq('referred_user_id', userId)
+      .eq('source_amount', creditedAmount)
+      .eq('source_currency', walletCurrency)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const dupLog = commLogs?.[0] ?? null;
+    const commissionToReverse = dupLog?.commission_amount ?? 0;
+
+    await supabase
+      .from('affiliate_referrals')
+      .update({
+        deposit_total: Math.max(0, referral.deposit_total - depositUsd),
+        commission_earned: Math.max(0, referral.commission_earned - commissionToReverse),
+      })
+      .eq('id', referral.id);
+
+    if (commissionToReverse > 0 && dupLog) {
+      const { data: aff } = await supabase
+        .from('affiliates')
+        .select('total_earnings, withdrawal_balance')
+        .eq('id', referral.affiliate_id)
+        .single();
+
+      if (aff) {
+        await supabase
+          .from('affiliates')
+          .update({
+            total_earnings: Math.max(0, aff.total_earnings - commissionToReverse),
+            withdrawal_balance: Math.max(0, aff.withdrawal_balance - commissionToReverse),
+          })
+          .eq('id', referral.affiliate_id);
+      }
+
+      await supabase.from('affiliate_commission_logs').delete().eq('id', dupLog.id);
+    }
+  }
+
   static async creditCpaCommission(userId: string, depositAmount: number, depositCurrency = 'GHS'): Promise<void> {
     const { data: referral } = await supabase
       .from('affiliate_referrals')
