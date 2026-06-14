@@ -606,7 +606,7 @@ router.get('/admin/:id/goal-schedule', authenticate, requireAdmin, async (req, r
   const goals = (match as any).is_scripted
     ? ScriptedMatchEngine.getScheduledGoals(id)
     : SimulationEngine.getScheduledGoals(id);
-  return sendSuccess(res, { data: goals });
+  return sendSuccess(res, goals);
 });
 
 router.patch('/admin/:id/goal-schedule', authenticate, requireAdmin, validateBody(z.object({
