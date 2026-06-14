@@ -39,6 +39,7 @@ interface MatchState {
 
 const activeMatches = new Map<string, NodeJS.Timeout>();
 const matchStates = new Map<string, MatchState>();
+const scheduledGoals = new Map<string, { minute: number; team: 'home' | 'away'; player?: string }[]>();
 
 const PLAYER_NAMES = {
   football: ['Santos', 'García', 'Silva', 'Müller', 'Kane', 'Mbappe', 'Saka', 'Salah', 'Vinicius', 'Bellingham', 'Griezmann', 'Modrić'],
@@ -269,6 +270,7 @@ export class SimulationEngine {
 
     await SimulationEngine.settleBets(matchId, result, state.scoreA, state.scoreB);
     matchStates.delete(matchId);
+    scheduledGoals.delete(matchId);
     logger.info(`Match ${matchId} completed: ${state.scoreA}-${state.scoreB}`);
   }
 
@@ -301,7 +303,16 @@ export class SimulationEngine {
       clearInterval(interval);
       activeMatches.delete(matchId);
       matchStates.delete(matchId);
+      scheduledGoals.delete(matchId);
     }
+  }
+
+  static scheduleGoals(matchId: string, goals: { minute: number; team: 'home' | 'away'; player?: string }[]) {
+    scheduledGoals.set(matchId, goals);
+  }
+
+  static getScheduledGoals(matchId: string): { minute: number; team: 'home' | 'away'; player?: string }[] {
+    return scheduledGoals.get(matchId) ?? [];
   }
 
   static pauseMatch(matchId: string) {
@@ -537,38 +548,27 @@ export class SimulationEngine {
 
 
   static async processMinute(state: MatchState) {
-    const { goalProb, cardProb } = state;
-    const totalStrength = state.teamAStrength + state.teamBStrength;
-    const teamAGoalWeight = state.teamAStrength / totalStrength;
+    const { cardProb } = state;
 
-    // Determine if a goal happens
-    const goalRoll = Math.random();
-    if (goalRoll < goalProb) {
-      const teamAScores = Math.random() < teamAGoalWeight;
+    // Fire admin-scheduled goals for this minute
+    const queued = (scheduledGoals.get(state.id) ?? []).filter(g => g.minute === state.minute);
+    for (const qg of queued) {
+      const teamAScores = qg.team === 'home';
       const scoringTeam = teamAScores ? 'a' : 'b';
       const teamName = teamAScores ? state.teamA : state.teamB;
-      const player = pickRandom(PLAYER_NAMES.football);
-
-      if (teamAScores) state.scoreA++;
-      else state.scoreB++;
+      const player = qg.player ?? pickRandom(PLAYER_NAMES.football);
+      if (teamAScores) state.scoreA++; else state.scoreB++;
       state.shots[scoringTeam]++;
       if (state.firstScorerTeam === null) state.firstScorerTeam = scoringTeam;
-
       const scoreStr = `${state.scoreA}-${state.scoreB}`;
       const commentary = formatCommentary(pickRandom(COMMENTARY_TEMPLATES.goal), player, teamName, scoreStr);
       await SimulationEngine.emitEvent(state, state.minute, 'goal', player, teamName, commentary, {
         score_a: state.scoreA, score_b: state.scoreB,
       });
-      // Immediate odds shock — recompute all markets right after the goal
       await regulateOdds(buildOddsContext(state));
-    } else if (goalRoll < goalProb * 2) {
-      // Shot off target
-      const teamAShots = Math.random() < teamAGoalWeight;
-      const teamName = teamAShots ? state.teamA : state.teamB;
-      const player = pickRandom(PLAYER_NAMES.football);
-      state.shots[teamAShots ? 'a' : 'b']++;
-      const commentary = formatCommentary(pickRandom(COMMENTARY_TEMPLATES.miss), player, teamName);
-      await SimulationEngine.emitEvent(state, state.minute, 'shot', player, teamName, commentary);
+    }
+    if (queued.length > 0) {
+      scheduledGoals.set(state.id, (scheduledGoals.get(state.id) ?? []).filter(g => g.minute !== state.minute));
     }
 
     // Yellow card

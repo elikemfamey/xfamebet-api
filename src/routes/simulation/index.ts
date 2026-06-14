@@ -597,6 +597,37 @@ router.patch('/admin/:id/market-lock', authenticate, requireAdmin, validateBody(
   return sendSuccess(res, { message: locked ? 'Market locked' : 'Market unlocked' });
 });
 
+// ── Admin: get / set goal schedule ───────────────────────────────────────────
+
+router.get('/admin/:id/goal-schedule', authenticate, requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
+  if (!match) return sendError(res, 'Match not found', 404);
+  const goals = (match as any).is_scripted
+    ? ScriptedMatchEngine.getScheduledGoals(id)
+    : SimulationEngine.getScheduledGoals(id);
+  return sendSuccess(res, { data: goals });
+});
+
+router.patch('/admin/:id/goal-schedule', authenticate, requireAdmin, validateBody(z.object({
+  goals: z.array(z.object({
+    minute: z.number().int().min(1).max(120),
+    team:   z.enum(['home', 'away']),
+    player: z.string().optional(),
+  })),
+})), async (req, res) => {
+  const { id } = req.params;
+  const { goals } = req.body;
+  const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
+  if (!match) return sendError(res, 'Match not found', 404);
+  if ((match as any).is_scripted) {
+    await ScriptedMatchEngine.scheduleGoals(id, goals);
+  } else {
+    SimulationEngine.scheduleGoals(id, goals);
+  }
+  return sendSuccess(res, { message: 'Goal schedule updated' });
+});
+
 // ── Admin: inject event ───────────────────────────────────────────────────────
 
 router.post('/admin/:id/inject-event', authenticate, requireAdmin, validateBody(z.object({

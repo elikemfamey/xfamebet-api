@@ -608,6 +608,42 @@ export class ScriptedMatchEngine {
     return activeMatches.has(matchId);
   }
 
+  static async scheduleGoals(
+    matchId: string,
+    goals: { minute: number; team: 'home' | 'away'; player?: string }[],
+  ) {
+    const state = matchStates.get(matchId);
+    if (state) {
+      // Replace only goal-type entries; preserve all other script events (cards, corners, etc.)
+      const nonGoals = state.scriptEvents.filter(e => e.type !== 'goal');
+      state.scriptEvents = [
+        ...nonGoals,
+        ...goals.map(g => ({ minute: g.minute, type: 'goal' as ScriptEventType, team: g.team, player: g.player })),
+      ];
+    }
+    // Persist so crash-recovery picks up the updated schedule
+    const { data: match } = await supabase.from('simulated_matches').select('script_events').eq('id', matchId).single();
+    if (match) {
+      const existing: ScriptEvent[] = ((match as any).script_events ?? []);
+      const nonGoals = existing.filter((e: ScriptEvent) => e.type !== 'goal');
+      const merged = [
+        ...nonGoals,
+        ...goals.map(g => ({ minute: g.minute, type: 'goal' as ScriptEventType, team: g.team, player: g.player })),
+      ];
+      await supabase.from('simulated_matches').update({ script_events: merged }).eq('id', matchId);
+    }
+  }
+
+  static getScheduledGoals(matchId: string): { minute: number; team: 'home' | 'away'; player?: string }[] {
+    const state = matchStates.get(matchId);
+    if (state) {
+      return state.scriptEvents
+        .filter(e => e.type === 'goal')
+        .map(e => ({ minute: e.minute, team: e.team, player: e.player }));
+    }
+    return [];
+  }
+
   static async generateOdds(
     matchId: string,
     overrides?: { homeOdds?: number; drawOdds?: number; awayOdds?: number; correctScoreOdds?: Record<string, number> },
