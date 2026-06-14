@@ -89,27 +89,35 @@ export function startWorkers() {
     }
   });
 
-  // Auto-start scripted matches at their scheduled time (checks every minute)
+  // Auto-start all scheduled matches at their scheduled time (checks every minute)
   cron.schedule('* * * * *', async () => {
     try {
       const { data: due } = await supabase
         .from('simulated_matches')
-        .select('id')
+        .select('id, is_scripted')
         .eq('status', 'scheduled')
-        .eq('is_scripted', true)
         .lte('scheduled_at', new Date().toISOString());
 
       for (const match of due ?? []) {
-        if (!ScriptedMatchEngine.isActive(match.id)) {
+        const isScripted = (match as any).is_scripted;
+        if (isScripted) {
+          if (!ScriptedMatchEngine.isActive(match.id)) {
+            await supabase.from('simulated_matches')
+              .update({ status: 'live', started_at: new Date().toISOString() })
+              .eq('id', match.id);
+            await ScriptedMatchEngine.startMatch(match.id);
+            logger.info(`Auto-started scripted match ${match.id}`);
+          }
+        } else {
           await supabase.from('simulated_matches')
             .update({ status: 'live', started_at: new Date().toISOString() })
             .eq('id', match.id);
-          await ScriptedMatchEngine.startMatch(match.id);
-          logger.info(`Auto-started scripted match ${match.id}`);
+          await SimulationEngine.startMatch(match.id);
+          logger.info(`Auto-started simulation match ${match.id}`);
         }
       }
     } catch (err) {
-      logger.error('Scripted match auto-start error', { err });
+      logger.error('Match auto-start error', { err });
     }
   });
 
