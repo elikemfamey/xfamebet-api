@@ -567,9 +567,7 @@ export class SimulationEngine {
       });
       await regulateOdds(buildOddsContext(state));
     }
-    if (queued.length > 0) {
-      scheduledGoals.set(state.id, (scheduledGoals.get(state.id) ?? []).filter(g => g.minute !== state.minute));
-    }
+    // Fired goals stay in the map so getScheduledGoals can return full history
 
     // Yellow card
     if (Math.random() < cardProb * 0.5) {

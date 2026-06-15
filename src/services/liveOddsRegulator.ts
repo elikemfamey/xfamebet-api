@@ -185,7 +185,6 @@ function buildOddsRows(ctx: OddsContext): object[] {
     sport,
     league,
     starts_at:  startsAt,
-    status:     'active',
     updated_at: new Date().toISOString(),
   };
 
