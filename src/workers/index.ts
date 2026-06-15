@@ -109,11 +109,13 @@ export function startWorkers() {
             logger.info(`Auto-started scripted match ${match.id}`);
           }
         } else {
-          await supabase.from('simulated_matches')
-            .update({ status: 'live', started_at: new Date().toISOString() })
-            .eq('id', match.id);
-          await SimulationEngine.startMatch(match.id);
-          logger.info(`Auto-started simulation match ${match.id}`);
+          if (!SimulationEngine.isActive(match.id)) {
+            await supabase.from('simulated_matches')
+              .update({ status: 'live', started_at: new Date().toISOString() })
+              .eq('id', match.id);
+            await SimulationEngine.startMatch(match.id);
+            logger.info(`Auto-started simulation match ${match.id}`);
+          }
         }
       }
     } catch (err) {

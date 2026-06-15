@@ -307,6 +307,10 @@ export class SimulationEngine {
     }
   }
 
+  static isActive(matchId: string): boolean {
+    return activeMatches.has(matchId);
+  }
+
   static scheduleGoals(matchId: string, goals: { minute: number; team: 'home' | 'away'; player?: string }[]) {
     scheduledGoals.set(matchId, goals);
   }
@@ -325,17 +329,14 @@ export class SimulationEngine {
   }
 
   static async resumeMatch(matchId: string) {
+    // Prevent duplicate interval if already running
+    if (activeMatches.has(matchId)) return;
     if (!matchStates.has(matchId)) {
       const { data: match } = await supabase.from('simulated_matches').select('*').eq('id', matchId).single();
       if (!match) return;
       const duration = (match as any).duration_minutes ?? 90;
-      const savedMinute = (match as any).current_minute ?? 0;
-      // On crash recovery, calculate actual elapsed minutes from started_at so the
-      // timer jumps to the correct position instead of replaying from the last saved tick.
-      const startedAt = (match as any).started_at ? new Date((match as any).started_at).getTime() : null;
-      const fromMinute = startedAt
-        ? Math.min(Math.floor((Date.now() - startedAt) / 60_000), duration - 1)
-        : savedMinute;
+      // Use the last saved DB minute so restarts/deploys don't jump the clock forward
+      const fromMinute = (match as any).current_minute ?? 0;
       const state: MatchState = {
         id: matchId,
         teamA: match.team_a,
