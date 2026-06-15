@@ -651,17 +651,41 @@ router.get('/admin/withdrawals', authenticate, requireAdmin, asyncHandler(async 
 }));
 
 // POST /payments/admin/withdrawals/:id/approve
-router.post('/admin/withdrawals/:id/approve', authenticate, requireAdmin, validateBody(z.object({ payout_reference: z.string().optional(), notes: z.string().optional() })), asyncHandler(async (req, res) => {
+router.post('/admin/withdrawals/:id/approve', authenticate, requireAdmin, validateBody(z.object({
+  payout_reference: z.string().optional(),
+  notes: z.string().optional(),
+  adjusted_amount: z.number().positive().optional(),
+})), asyncHandler(async (req, res) => {
   const { id } = req.params;
-  const { payout_reference, notes } = req.body;
+  const { payout_reference, notes, adjusted_amount } = req.body;
 
   const { data: withdrawal } = await supabase.from('withdrawal_requests').select('*').eq('id', id).single();
   if (!withdrawal) return sendError(res, 'Withdrawal not found', 404);
   if (withdrawal.status !== 'pending') return sendError(res, 'Already processed', 400);
 
-  await supabase.from('withdrawal_requests').update({ status: 'approved', reviewed_by: req.user!.id, reviewed_at: new Date().toISOString(), payout_reference, notes }).eq('id', id);
-  await NotificationService.send(withdrawal.user_id, 'withdrawal_approved', 'Withdrawal Approved', `Your withdrawal of ${withdrawal.currency} ${withdrawal.amount} has been approved.`);
-  await AdminLogService.log(req.user!.id, 'approve_withdrawal', 'withdrawal_request', id, { amount: withdrawal.amount, payout_reference });
+  if (adjusted_amount !== undefined && adjusted_amount > withdrawal.amount) {
+    return sendError(res, 'Adjusted amount cannot exceed the original requested amount', 400);
+  }
+
+  const finalAmount = adjusted_amount ?? withdrawal.amount;
+
+  // If admin reduced the payout amount, credit the difference back to the user's wallet
+  if (adjusted_amount !== undefined && adjusted_amount < withdrawal.amount) {
+    const refundDiff = withdrawal.amount - adjusted_amount;
+    const isAffiliateWithdrawal = (withdrawal.account_details as Record<string, unknown>)?.type === 'affiliate_earnings';
+    if (isAffiliateWithdrawal) {
+      const { data: affiliate } = await supabase.from('affiliates').select('id, withdrawal_balance').eq('user_id', withdrawal.user_id).single();
+      if (affiliate) {
+        await supabase.from('affiliates').update({ withdrawal_balance: affiliate.withdrawal_balance + refundDiff }).eq('id', affiliate.id);
+      }
+    } else {
+      await WalletService.credit(withdrawal.user_id, refundDiff, 'refund', undefined, undefined, `Withdrawal amount adjusted — ${withdrawal.currency} ${refundDiff} returned`);
+    }
+  }
+
+  await supabase.from('withdrawal_requests').update({ status: 'approved', amount: finalAmount, reviewed_by: req.user!.id, reviewed_at: new Date().toISOString(), payout_reference, notes }).eq('id', id);
+  await NotificationService.send(withdrawal.user_id, 'withdrawal_approved', 'Withdrawal Approved', `Your withdrawal of ${withdrawal.currency} ${finalAmount} has been approved.`);
+  await AdminLogService.log(req.user!.id, 'approve_withdrawal', 'withdrawal_request', id, { original_amount: withdrawal.amount, approved_amount: finalAmount, payout_reference });
 
   return sendSuccess(res, { message: 'Withdrawal approved' });
 }));
