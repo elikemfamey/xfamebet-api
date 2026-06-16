@@ -114,6 +114,17 @@ router.post('/users/:id/revoke-sessions', async (req, res) => {
   return sendSuccess(res, { message: 'All sessions revoked' });
 });
 
+// DELETE /admin/users/:id
+router.delete('/users/:id', validateBody(z.object({ reason: z.string() })), async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  await supabase.from('sessions').update({ revoked_at: new Date().toISOString() }).eq('user_id', id);
+  await supabase.from('wallets').update({ frozen: true }).eq('user_id', id);
+  await supabase.from('users').update({ account_status: 'deleted' }).eq('id', id);
+  await AdminLogService.log(req.user!.id, 'delete_user', 'users', id, { reason });
+  return sendSuccess(res, { message: 'User deleted' });
+});
+
 // GET /admin/users/:id/bets
 router.get('/users/:id/bets', async (req, res) => {
   const page = parseInt(req.query.page as string) || 1;
