@@ -120,7 +120,15 @@ router.delete('/users/:id', validateBody(z.object({ reason: z.string() })), asyn
   const { reason } = req.body;
   await supabase.from('sessions').update({ revoked_at: new Date().toISOString() }).eq('user_id', id);
   await supabase.from('wallets').update({ frozen: true }).eq('user_id', id);
-  await supabase.from('users').update({ account_status: 'deleted' }).eq('id', id);
+  // Anonymize unique fields so the user can re-register with the same credentials.
+  // 'deleted' is not in the account_status enum, so we use 'banned' to block login.
+  const shortId = id.replace(/-/g, '').slice(0, 24);
+  await supabase.from('users').update({
+    account_status: 'banned',
+    email: `deleted_${shortId}@deleted.invalid`,
+    username: `deleted_${shortId}`,
+    phone: null,
+  }).eq('id', id);
   await AdminLogService.log(req.user!.id, 'delete_user', 'users', id, { reason });
   return sendSuccess(res, { message: 'User deleted' });
 });
