@@ -1,8 +1,9 @@
 import { supabase } from '../config/supabase';
-import { getIO } from '../socket';
+import { getIO, broadcastBetWon, broadcastWalletUpdate } from '../socket';
 import { redis, REDIS_KEYS } from '../config/redis';
 import { logger } from '../utils/logger';
 import { regulateOdds, OddsContext } from './liveOddsRegulator';
+import { WalletService } from './walletService';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,6 +67,12 @@ interface MatchState {
   halftimeScoreB: number;
   firstScorerTeam: string | null;
 }
+
+const STANDARD_CORRECT_SCORES = [
+  '0-0','1-0','0-1','1-1','2-0','0-2','2-1','1-2',
+  '2-2','3-0','0-3','3-1','1-3','3-2','2-3','3-3',
+  '4-0','0-4','4-1','1-4','4-2','2-4',
+];
 
 // ── In-memory maps ─────────────────────────────────────────────────────────────
 
@@ -142,6 +149,7 @@ async function saveEvent(
 
 async function settleBets(matchId: string, result: string, scoreA: number, scoreB: number) {
   const eventId = `sim:${matchId}`;
+  const finalScore = `${scoreA}-${scoreB}`;
   const totalGoals = scoreA + scoreB;
 
   const { data: firstGoalEvent } = await supabase
@@ -214,8 +222,41 @@ async function settleBets(matchId: string, result: string, scoreA: number, score
       } else if (sel.market_type === 'cards') {
         if (sel.selection === 'over_3.5') won = totalCards > 3.5;
         else if (sel.selection === 'under_3.5') won = totalCards <= 3.5;
+      } else if (sel.market_type === 'correct_score') {
+        if (sel.selection === 'other') {
+          won = !STANDARD_CORRECT_SCORES.includes(finalScore);
+        } else {
+          won = sel.selection === finalScore;
+        }
       }
       await supabase.from('bet_selections').update({ status: won ? 'won' : 'lost' }).eq('id', sel.id);
+    }
+
+    // Check if ALL legs of this bet are now settled (handles accumulators across multiple matches)
+    const { data: allSels } = await supabase.from('bet_selections')
+      .select('status').eq('bet_id', bet.id);
+
+    if (!allSels || allSels.some(s => s.status === 'pending')) continue;
+
+    const betWon = allSels.every(s => s.status === 'won');
+    const betStatus = betWon ? 'won' : 'lost';
+    const payout = betWon ? bet.potential_payout : 0;
+
+    await supabase.from('bets').update({
+      status: betStatus,
+      settled_at: new Date().toISOString(),
+      payout,
+      metadata: { finalScores: { [eventId]: finalScore } },
+    }).eq('id', bet.id);
+
+    if (betWon) {
+      try {
+        const { new_balance } = await WalletService.credit(bet.user_id, payout, 'bet_win', undefined, undefined, `Bet won - ${bet.id}`);
+        broadcastWalletUpdate(bet.user_id, new_balance);
+        broadcastBetWon(bet.user_id, { betId: bet.id, amount: payout, currency: 'GHS' });
+      } catch (e) {
+        logger.error('Failed to credit win payout', { betId: bet.id, error: e });
+      }
     }
   }
 }
@@ -354,7 +395,9 @@ async function handleScriptedFulltime(matchId: string, state: MatchState) {
 
   await saveEvent(state, state.duration, 'fulltime', '', '', 'Full-time! The final whistle has been blown.');
   await supabase.from('simulated_matches').update({
-    status: 'completed', result, current_minute: state.duration, ended_at: new Date().toISOString(),
+    status: 'completed', result,
+    team_a_score: state.scoreA, team_b_score: state.scoreB,
+    current_minute: state.duration, ended_at: new Date().toISOString(),
   }).eq('id', matchId);
   await supabase.from('odds_feed').update({ status: 'settled' })
     .eq('event_id', `sim:${matchId}`).eq('source', 'simulation');
