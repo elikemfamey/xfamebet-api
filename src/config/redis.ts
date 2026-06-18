@@ -4,7 +4,14 @@ import { logger } from '../utils/logger';
 
 export const redis = new Redis(env.REDIS_URL, {
   maxRetriesPerRequest: 3,
-  retryStrategy: (times) => Math.min(times * 50, 2000),
+  // Stop reconnecting after 20 failures to prevent quota exhaustion on bad credentials
+  retryStrategy: (times) => {
+    if (times > 20) {
+      logger.error('Redis: too many reconnect attempts, giving up');
+      return null;
+    }
+    return Math.min(times * 200, 5000);
+  },
 });
 
 redis.on('connect', () => logger.info('Redis connected'));

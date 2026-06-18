@@ -135,7 +135,13 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
       logger.info(`[LiveScores] Cached ${scores.length} live matches`);
 
       // Bust live-feed variant caches so next request rebuilds with fresh scores
-      const feedKeys = await redis.keys('live_feed:*');
+      const feedKeys: string[] = [];
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'live_feed:*', 'COUNT', 100);
+        cursor = nextCursor;
+        feedKeys.push(...keys);
+      } while (cursor !== '0');
       if (feedKeys.length > 0) await redis.del(...feedKeys);
 
       // Notify all connected clients so they refetch the live feed immediately
