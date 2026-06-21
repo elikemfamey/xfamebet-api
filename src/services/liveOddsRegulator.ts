@@ -21,6 +21,12 @@ const MIN_ODDS = 1.01;
 const MAX_ODDS = 200;
 const MAX_EXTRA_GOALS = 12; // max additional goals per team in Poisson grid
 
+const CS_STANDARD = [
+  '0-0','1-0','0-1','1-1','2-0','0-2','2-1','1-2',
+  '2-2','3-0','0-3','3-1','1-3','3-2','2-3','3-3',
+  '4-0','0-4','4-1','1-4','4-2','2-4',
+];
+
 // ── Math helpers ──────────────────────────────────────────────────────────────
 
 /** Poisson PMF — iterative to avoid large factorial values */
@@ -110,6 +116,45 @@ function totalGoalsExact(currentTotal: number, lambdaTotal: number) {
     p23:   Math.max(0.005, p23),
     p4plus: Math.max(0.005, p4plus),
   };
+}
+
+/**
+ * Correct score: iterate the bivariate Poisson grid to get probability mass
+ * for each reachable final scoreline from the current live score.
+ * Scores no longer reachable (needs fewer total goals than already scored) get
+ * MAX_ODDS. Non-standard scorelines are bundled into 'other'.
+ */
+function correctScoreOdds(
+  scoreA: number, scoreB: number,
+  lambdaA: number, lambdaB: number,
+): { selection: string; odds_value: number }[] {
+  const probs: Record<string, number> = {};
+
+  for (let ha = 0; ha <= MAX_EXTRA_GOALS; ha++) {
+    const pHA = pPmf(ha, lambdaA);
+    if (pHA < 1e-9) continue;
+    for (let hb = 0; hb <= MAX_EXTRA_GOALS; hb++) {
+      const p = pHA * pPmf(hb, lambdaB);
+      if (p < 1e-12) continue;
+      const key = `${scoreA + ha}-${scoreB + hb}`;
+      probs[key] = (probs[key] ?? 0) + p;
+    }
+  }
+
+  const stdSet = new Set(CS_STANDARD);
+  let otherProb = 0;
+  for (const [key, p] of Object.entries(probs)) {
+    if (!stdSet.has(key)) otherProb += p;
+  }
+
+  const result: { selection: string; odds_value: number }[] = [];
+  for (const s of CS_STANDARD) {
+    const p = probs[s] ?? 0;
+    result.push({ selection: s, odds_value: p > 1e-9 ? toOdds(p) : MAX_ODDS });
+  }
+  result.push({ selection: 'other', odds_value: otherProb > 1e-9 ? toOdds(otherProb) : MAX_ODDS });
+
+  return result;
 }
 
 // ── Public interface ──────────────────────────────────────────────────────────
@@ -273,6 +318,13 @@ function buildOddsRows(ctx: OddsContext): object[] {
     push('half_time_result', 'home', toOdds(htA));
     push('half_time_result', 'draw', toOdds(htD));
     push('half_time_result', 'away', toOdds(htB));
+  }
+
+  // ── 10. Correct Score ─────────────────────────────────────────────────────
+  //  Poisson-derived odds for every standard scoreline plus an 'other' bucket.
+  //  Impossible scorelines (already past) are set to MAX_ODDS.
+  for (const { selection, odds_value } of correctScoreOdds(scoreA, scoreB, lambdaA, lambdaB)) {
+    push('correct_score', selection, odds_value);
   }
 
   return rows;
