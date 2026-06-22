@@ -20,6 +20,7 @@ export interface ScriptEvent {
   player_on?: string;    // substitution: who comes on
   assist?: string;
   commentary?: string;   // optional override; auto-generated when omitted
+  _fired?: boolean;      // set true after the event fires — prevents re-firing on backward time jumps or halftime extra ticks
 }
 
 export interface ScriptStats {
@@ -362,8 +363,9 @@ async function interpolateStats(state: MatchState) {
 }
 
 async function processScriptedMinute(state: MatchState, matchId: string) {
-  const eventsNow = state.scriptEvents.filter(e => e.minute === state.minute);
+  const eventsNow = state.scriptEvents.filter(e => e.minute === state.minute && !e._fired);
   for (const ev of eventsNow) {
+    ev._fired = true;
     const teamName = ev.team === 'home' ? state.teamA : state.teamB;
     const sideKey  = ev.team === 'home' ? 'a' : 'b';
     const player   = ev.player ?? '';
@@ -657,7 +659,15 @@ export class ScriptedMatchEngine {
       const nonGoals = state.scriptEvents.filter(e => e.type !== 'goal');
       state.scriptEvents = [
         ...nonGoals,
-        ...goals.map(g => ({ minute: g.minute, type: 'goal' as ScriptEventType, team: g.team, player: g.player })),
+        ...goals.map(g => ({
+          minute: g.minute,
+          type: 'goal' as ScriptEventType,
+          team: g.team,
+          player: g.player,
+          // Goals at or before the current minute have already passed — mark as fired
+          // so a backward time-control jump cannot cause them to score again
+          _fired: g.minute <= state.minute,
+        })),
       ];
     }
     // Persist so crash-recovery picks up the updated schedule

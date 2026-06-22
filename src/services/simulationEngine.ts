@@ -39,7 +39,7 @@ interface MatchState {
 
 const activeMatches = new Map<string, NodeJS.Timeout>();
 const matchStates = new Map<string, MatchState>();
-const scheduledGoals = new Map<string, { minute: number; team: 'home' | 'away'; player?: string }[]>();
+const scheduledGoals = new Map<string, { minute: number; team: 'home' | 'away'; player?: string; _fired?: boolean }[]>();
 
 const PLAYER_NAMES = {
   football: ['Santos', 'García', 'Silva', 'Müller', 'Kane', 'Mbappe', 'Saka', 'Salah', 'Vinicius', 'Bellingham', 'Griezmann', 'Modrić'],
@@ -313,7 +313,13 @@ export class SimulationEngine {
   }
 
   static scheduleGoals(matchId: string, goals: { minute: number; team: 'home' | 'away'; player?: string }[]) {
-    scheduledGoals.set(matchId, goals);
+    const state = matchStates.get(matchId);
+    scheduledGoals.set(matchId, goals.map(g => ({
+      ...g,
+      // Goals at or before the current minute have already passed — mark fired
+      // so a backward time-control jump cannot cause them to score again
+      _fired: state ? g.minute <= state.minute : false,
+    })));
   }
 
   static getScheduledGoals(matchId: string): { minute: number; team: 'home' | 'away'; player?: string }[] {
@@ -552,9 +558,10 @@ export class SimulationEngine {
   static async processMinute(state: MatchState) {
     const { cardProb } = state;
 
-    // Fire admin-scheduled goals for this minute
-    const queued = (scheduledGoals.get(state.id) ?? []).filter(g => g.minute === state.minute);
+    // Fire admin-scheduled goals for this minute (skip already-fired ones)
+    const queued = (scheduledGoals.get(state.id) ?? []).filter(g => g.minute === state.minute && !g._fired);
     for (const qg of queued) {
+      qg._fired = true;
       const teamAScores = qg.team === 'home';
       const scoringTeam = teamAScores ? 'a' : 'b';
       const teamName = teamAScores ? state.teamA : state.teamB;
