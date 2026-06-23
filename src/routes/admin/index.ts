@@ -139,7 +139,7 @@ router.get('/users/:id/bets', async (req, res) => {
   const limit = 20;
   const offset = (page - 1) * limit;
   const { data, count } = await supabase.from('bets')
-    .select('id, stake, payout, status, odds, selections, placed_at, settled_at', { count: 'exact' })
+    .select('id, stake, payout, status, odds, placed_at, settled_at, bet_selections(event_name, selection, market_type, odds)', { count: 'exact' })
     .eq('user_id', req.params.id)
     .order('placed_at', { ascending: false })
     .range(offset, offset + limit - 1);
