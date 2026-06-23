@@ -146,6 +146,59 @@ router.get('/users/:id/bets', async (req, res) => {
   return sendPaginated(res, data ?? [], count ?? 0, page, limit);
 });
 
+// GET /admin/users/:id/crash-bets
+router.get('/users/:id/crash-bets', async (req, res) => {
+  const userId = req.params.id;
+
+  const [stakesRes, winsRes] = await Promise.all([
+    supabase.from('transactions')
+      .select('id, amount, currency, created_at')
+      .eq('user_id', userId)
+      .eq('type', 'bet_stake')
+      .contains('metadata', { game: 'crash' })
+      .order('created_at', { ascending: false })
+      .limit(100),
+    supabase.from('transactions')
+      .select('id, amount, metadata, created_at')
+      .eq('user_id', userId)
+      .eq('type', 'bet_win')
+      .contains('metadata', { game: 'crash' })
+      .order('created_at', { ascending: true }),
+  ]);
+
+  const stakes = stakesRes.data ?? [];
+  const wins = winsRes.data ?? [];
+
+  const stakesSorted = [...stakes].sort((a, b) =>
+    new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+  );
+
+  const rows = stakesSorted.map((stake, i) => {
+    const stakeMs = new Date(stake.created_at).getTime();
+    const nextStakeMs = i + 1 < stakesSorted.length
+      ? new Date(stakesSorted[i + 1].created_at).getTime()
+      : Infinity;
+
+    const win = wins.find(w => {
+      const wMs = new Date(w.created_at).getTime();
+      return wMs > stakeMs && wMs < nextStakeMs && wMs - stakeMs <= 600_000;
+    });
+
+    return {
+      id: stake.id,
+      stake: Math.abs(stake.amount),
+      currency: stake.currency,
+      placed_at: stake.created_at,
+      status: win ? 'won' : 'lost',
+      multiplier: win ? (win.metadata as Record<string, number>)?.multiplier ?? null : null,
+      payout: win ? win.amount : 0,
+    };
+  });
+
+  rows.reverse();
+  return sendSuccess(res, rows);
+});
+
 // GET /admin/users/:id/transactions
 router.get('/users/:id/transactions', async (req, res) => {
   const [depositsRes, withdrawalsRes] = await Promise.all([
