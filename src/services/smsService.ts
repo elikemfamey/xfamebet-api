@@ -99,7 +99,7 @@ export async function sendOtpSms(phone: string, otp: string, country = 'GH'): Pr
   }
 
   const normalizedPhone = toE164(phone, country);
-  const message = `Your XfameBet code is: ${otp}. Valid for 10 mins. Never share this code.`;
+  const message = `Your Primewin code is: ${otp}. Valid for 10 mins. Never share this code.`;
 
   // --- Try Africa's Talking first ---
   let atStatus: string | undefined;

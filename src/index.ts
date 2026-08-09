@@ -64,7 +64,7 @@ app.use(generalLimiter);
 
 // Health check
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), service: 'xfamebet-api' });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), service: 'primewin-api' });
 });
 
 // API Routes
@@ -91,7 +91,7 @@ initSocketIO(server);
 startWorkers();
 
 server.listen(env.PORT, () => {
-  logger.info(`XfameBet API running on port ${env.PORT} [${env.NODE_ENV}]`);
+  logger.info(`Primewin API running on port ${env.PORT} [${env.NODE_ENV}]`);
 });
 
 export default app;

@@ -129,15 +129,31 @@ function buildOddsRows(
 
 // Fetch all active sports from The Odds API (cached 30 min in Redis)
 const SPORTS_CACHE_KEY = 'odds_api:active_sports';
+const INVALID_KEY_RETRY_MS = 15 * 60 * 1000;
+let oddsApiDisabledUntil = 0;
 
 export async function getActiveSports(): Promise<Array<{ key: string; sport: string; league: string }>> {
+  if (Date.now() < oddsApiDisabledUntil) {
+    return [];
+  }
+
   const cached = await redis.get(SPORTS_CACHE_KEY);
   if (cached) return JSON.parse(cached);
 
-  const resp = await axios.get('https://api.the-odds-api.com/v4/sports', {
-    params: { apiKey: env.ODDS_API_KEY },
-    timeout: 10000,
-  });
+  let resp;
+  try {
+    resp = await axios.get('https://api.the-odds-api.com/v4/sports', {
+      params: { apiKey: env.ODDS_API_KEY },
+      timeout: 10000,
+    });
+  } catch (err: any) {
+    if (err.response?.status === 401) {
+      oddsApiDisabledUntil = Date.now() + INVALID_KEY_RETRY_MS;
+      logger.error('[OddsIngestion] ODDS_API_KEY was rejected; odds ingestion will retry in 15 minutes. Replace the key in the environment.');
+      return [];
+    }
+    throw err;
+  }
 
   const all: OddsApiSport[] = resp.data;
 

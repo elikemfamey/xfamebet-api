@@ -10,7 +10,7 @@ export const logger = winston.createLogger({
     errors({ stack: true }),
     json()
   ),
-  defaultMeta: { service: 'xfamebet-api' },
+  defaultMeta: { service: 'primewin-api' },
   transports: [
     new winston.transports.Console({
       format: env.NODE_ENV === 'production'
