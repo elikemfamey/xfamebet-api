@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { resolveTeamLogo } from '../../services/teamLogoService';
+import { resolveLeagueLogo } from '../../services/leagueLogoService';
 import { teamLogoLimiter } from '../../middleware/rateLimiter';
 import { sendSuccess, sendError } from '../../utils/response';
 import { logger } from '../../utils/logger';
@@ -23,6 +24,27 @@ router.post('/batch', async (req, res) => {
     })
   );
   return sendSuccess(res, results);
+});
+
+router.post('/league/batch', async (req, res) => {
+  const leagues = req.body?.leagues;
+  if (!Array.isArray(leagues) || leagues.length === 0) return sendError(res, 'leagues array required', 400);
+  const results = await Promise.all((leagues as Array<{ name: string; sport?: string }>).slice(0, 100).map(async ({ name, sport }) => {
+    const result = await resolveLeagueLogo(name ?? '', sport);
+    return result;
+  }));
+  return sendSuccess(res, results);
+});
+
+router.get('/league/:leagueName', async (req, res) => {
+  const name = req.params.leagueName?.trim();
+  if (!name) return sendError(res, 'leagueName is required', 400);
+  try {
+    return sendSuccess(res, await resolveLeagueLogo(decodeURIComponent(name), req.query.sport as string | undefined));
+  } catch (err: any) {
+    logger.error('[LeagueLogo] Route error', { leagueName: name, error: err.message });
+    return sendError(res, 'Failed to resolve league logo', 500);
+  }
 });
 
 // GET /api/team-logo/:teamName?sport=football|tennis|basketball…
