@@ -9,7 +9,9 @@
     "lint": "eslint src --ext .ts",
     "test": "jest",
     "db:migrate": "node -r ts-node/register src/db/migrate.ts",
-    "db:seed": "node -r ts-node/register src/db/seed.ts"
+    "db:seed": "node -r ts-node/register src/db/seed.ts",
+    "db:reset": "node -r ts-node/register src/db/reset.ts",
+    "db:seed-staff-promo": "node -r ts-node/register src/db/seedStaffPromo.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.43.5",
