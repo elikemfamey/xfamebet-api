@@ -24,6 +24,7 @@ import fraudRoutes from './routes/fraud';
 import matchRoutes from './routes/matches';
 import teamLogoRoutes from './routes/teams';
 import crashRoutes from './routes/crash';
+import countryRoutes from './routes/countries';
 import gameRoutes from './routes/games';
 
 validateEnv();
@@ -80,6 +81,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/simulation', simulationRoutes);
 app.use('/api/fraud', fraudRoutes);
 app.use('/api/crash', crashRoutes);
+app.use('/api/countries', countryRoutes);
 app.use('/api/games', gameRoutes);
 
 // 404 and error handling
