@@ -10,6 +10,7 @@
     "test": "jest",
     "db:migrate": "node -r ts-node/register src/db/migrate.ts",
     "db:seed": "node -r ts-node/register src/db/seed.ts",
+    "db:seed-users": "node -r ts-node/register src/db/seedUsers.ts",
     "db:reset": "node -r ts-node/register src/db/reset.ts",
     "db:seed-staff-promo": "node -r ts-node/register src/db/seedStaffPromo.ts"
   },
