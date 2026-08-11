@@ -23,6 +23,29 @@ const TO_USD: Record<string, number> = {
 };
 const toUsd = (amount: number, currency: string) => amount * (TO_USD[currency] ?? 1);
 
+// ==================== FX RATES ====================
+router.get('/fx-rates', async (_req, res) => {
+  const { data, error } = await supabase.from('currency_exchange_rates').select('*').order('currency');
+  if (error) return sendError(res, error.message, 500);
+  return sendSuccess(res, data ?? []);
+});
+
+router.put('/fx-rates/:currency', validateBody(z.object({
+  usd_rate: z.number().positive(), effective_at: z.string().datetime().optional(),
+})), async (req, res) => {
+  const currency = req.params.currency.toUpperCase();
+  if (!['GHS', 'NGN', 'USD', 'USDT'].includes(currency)) return sendError(res, 'Unsupported currency', 400);
+  const { usd_rate, effective_at } = req.body;
+  const effectiveAt = effective_at ?? new Date().toISOString();
+  const { error } = await supabase.from('currency_exchange_rates').upsert({
+    currency, usd_rate, effective_at: effectiveAt, updated_by: req.user!.id, updated_at: new Date().toISOString(),
+  }, { onConflict: 'currency' });
+  if (error) return sendError(res, error.message, 500);
+  await supabase.from('currency_exchange_rate_history').insert({ currency, usd_rate, effective_at: effectiveAt, updated_by: req.user!.id });
+  await AdminLogService.log(req.user!.id, 'update_fx_rate', 'currency_exchange_rate', currency, { usd_rate, effective_at: effectiveAt });
+  return sendSuccess(res, { message: 'FX rate updated' });
+});
+
 // ==================== USERS ====================
 
 // GET /admin/users
@@ -346,8 +369,8 @@ router.get('/revenue', async (req, res) => {
 
   const [betsResult, depositsResult, withdrawalsResult, usersResult] = await Promise.all([
     supabase.from('bets').select('stake, payout, status, user_id').gte('placed_at', from).lte('placed_at', to),
-    supabase.from('deposit_requests').select('amount, currency').eq('status', 'approved').gte('created_at', from).lte('created_at', to),
-    supabase.from('withdrawal_requests').select('amount, currency').eq('status', 'approved').gte('created_at', from).lte('created_at', to),
+    supabase.from('deposit_requests').select('amount, currency, metadata').in('status', ['approved', 'completed']).gte('created_at', from).lte('created_at', to),
+    supabase.from('withdrawal_requests').select('amount, currency, account_details').in('status', ['approved', 'completed']).gte('created_at', from).lte('created_at', to),
     supabase.from('users').select('id', { count: 'exact' }).gte('created_at', from).lte('created_at', to),
   ]);
 
@@ -370,10 +393,16 @@ router.get('/revenue', async (req, res) => {
   const grossRevenueUsd = parseFloat((totalBetVolumeUsd - totalWinningsUsd).toFixed(2));
 
   const totalDepositsUsd = parseFloat(
-    (depositsResult.data ?? []).reduce((s, d) => s + toUsd(d.amount as number, (d.currency as string) ?? 'GHS'), 0).toFixed(2),
+    (depositsResult.data ?? []).reduce((s, d) => {
+      const snapshot = Number((d.metadata as Record<string, unknown> | null)?.usd_equivalent);
+      return s + (Number.isFinite(snapshot) && snapshot > 0 ? snapshot : toUsd(d.amount as number, (d.currency as string) ?? 'GHS'));
+    }, 0).toFixed(2),
   );
   const totalWithdrawalsUsd = parseFloat(
-    (withdrawalsResult.data ?? []).reduce((s, w) => s + toUsd(w.amount as number, (w.currency as string) ?? 'USD'), 0).toFixed(2),
+    (withdrawalsResult.data ?? []).reduce((s, w) => {
+      const snapshot = Number((w.account_details as Record<string, unknown> | null)?.usd_equivalent);
+      return s + (Number.isFinite(snapshot) && snapshot > 0 ? snapshot : toUsd(w.amount as number, (w.currency as string) ?? 'USD'));
+    }, 0).toFixed(2),
   );
 
   return sendSuccess(res, {

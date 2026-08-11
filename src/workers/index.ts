@@ -9,6 +9,7 @@ import { SimulationEngine } from '../services/simulationEngine';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { refreshPopularMatches } from '../services/popularMatchService';
 import { logger } from '../utils/logger';
+import { MoolreService } from '../services/moolreService';
 
 async function fetchLiveScores(): Promise<void> {
   try {
@@ -20,6 +21,19 @@ async function fetchLiveScores(): Promise<void> {
 }
 
 export function startWorkers() {
+  // Recover Moolre deposits when a provider callback was delayed or missed.
+  cron.schedule('*/15 * * * *', async () => {
+    if (!MoolreService.isConfigured()) return;
+    try {
+      const { data: pending } = await supabase.from('deposit_requests')
+        .select('id, reference, amount').eq('payment_provider', 'moolre').eq('status', 'pending')
+        .lt('created_at', new Date(Date.now() - 60_000).toISOString()).limit(100);
+      for (const deposit of pending ?? []) {
+        try { await MoolreService.verifyAndCredit(deposit); }
+        catch (err) { logger.warn('Moolre reconciliation failed', { depositId: deposit.id, err }); }
+      }
+    } catch (err) { logger.error('Moolre reconciliation worker error', { err }); }
+  });
   // Refresh popular matches every day at midnight
   cron.schedule('0 0 * * *', async () => {
     try {

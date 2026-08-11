@@ -1,6 +1,5 @@
 import { RequestHandler, Router } from 'express';
 import { z } from 'zod';
-import crypto from 'crypto';
 import multer from 'multer';
 import { supabase } from '../../config/supabase';
 import { WalletService } from '../../services/walletService';
@@ -12,6 +11,7 @@ import { paymentLimiter } from '../../middleware/rateLimiter';
 import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
 import { AffiliateService } from '../../services/affiliateService';
+import { MoolreService } from '../../services/moolreService';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -25,39 +25,12 @@ const upload = multer({
 const router = Router();
 
 // ---------------------------------------------------------------------------
-// Currency-locking helpers
-// ---------------------------------------------------------------------------
-
-/** Return the correct wallet currency for a given country + deposit provider. */
-function determineCurrency(country: string, provider: string): string {
-  if (country === 'NG' && provider === 'ng_bank_transfer') return 'NGN';
-  if (country === 'GH' && ['momo_mtn', 'momo_telecel', 'momo_airteltigo'].includes(provider)) return 'GHS';
-  return 'USD';
-}
-
-/**
- * If the wallet currency has not been locked yet, set it based on the first
- * deposit's country + provider and lock it permanently.
- */
-async function maybeLockWalletCurrency(userId: string, country: string, provider: string): Promise<void> {
-  const { data: wallet } = await supabase
-    .from('wallets').select('id, currency_locked').eq('user_id', userId).single();
-  if (!wallet || wallet.currency_locked) return;
-  const currency = determineCurrency(country, provider);
-  await supabase.from('wallets')
-    .update({ currency, currency_locked: true })
-    .eq('id', wallet.id);
-}
-
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
 
 // ---------------------------------------------------------------------------
 
-const paystackInitSchema = z.object({
-  amount: z.number().min(10).max(100000),
-  callback_url: z.string().url().optional(),
-});
+const moolreInitSchema = z.object({ amount: z.number().positive().max(100000) });
 
 const manualMomoSchema = z.object({
   amount: z.number().min(5),
@@ -107,79 +80,60 @@ const approveDepositSchema = z.object({
   credited_amount: z.number().positive().optional(),
 });
 
-// POST /payments/paystack/initialize
-router.post('/paystack/initialize', authenticate, paymentLimiter, validateBody(paystackInitSchema), asyncHandler(async (req, res) => {
-  const { amount, callback_url } = req.body;
-  const { data: user } = await supabase.from('users').select('email').eq('id', req.user!.id).single();
-  if (!user) return sendError(res, 'User not found', 404);
+// Paystack is intentionally disabled. Historic records remain visible to admins.
+router.post('/paystack/initialize', authenticate, (_req, res) => sendError(res, 'Paystack is disabled. Use Moolre, bank transfer, or USDT.', 410));
+router.post('/paystack/webhook', (_req, res) => res.status(410).json({ error: 'Paystack is disabled' }));
 
-  const reference = `PSK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+// POST /payments/moolre/initialize -- Ghana GHS checkout only.
+router.post('/moolre/initialize', authenticate, paymentLimiter, validateBody(moolreInitSchema), asyncHandler(async (req, res) => {
+  if (!MoolreService.isConfigured()) return sendError(res, 'Moolre is not configured', 503);
+  const { amount } = req.body;
+  const [{ data: user }, { data: wallet }] = await Promise.all([
+    supabase.from('users').select('country').eq('id', req.user!.id).single(),
+    supabase.from('wallets').select('currency, currency_locked').eq('user_id', req.user!.id).single(),
+  ]);
+  if (!user || !wallet) return sendError(res, 'User wallet not found', 404);
+  if (user.country !== 'GH') return sendError(res, 'Moolre deposits are currently available to Ghana users only', 403);
+  if (wallet.currency_locked && wallet.currency !== 'GHS') return sendError(res, 'Moolre is available only for GHS wallets', 400);
 
-  const response = await fetch('https://api.paystack.co/transaction/initialize', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.PAYSTACK_SECRET_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      email: user.email,
-      amount: amount * 100,
-      reference,
-      callback_url: callback_url ?? `${env.FRONTEND_URL}/wallet?deposit=success`,
-      metadata: { user_id: req.user!.id },
-    }),
+  const reference = `MLR-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const { error } = await supabase.from('deposit_requests').insert({
+    user_id: req.user!.id, amount, currency: 'GHS', payment_provider: 'moolre', reference, status: 'pending',
+    metadata: { requested_wallet_currency: wallet.currency, country: user.country },
   });
-
-  const data = await response.json() as { status: boolean; data: { authorization_url: string; reference: string } };
-
-  if (!data.status) return sendError(res, 'Paystack initialization failed', 500);
-
-  await supabase.from('deposit_requests').insert({
-    user_id: req.user!.id,
-    amount,
-    currency: 'GHS',
-    payment_provider: 'paystack',
-    reference: data.data.reference,
-    status: 'pending',
-  });
-
-  return sendSuccess(res, {
-    authorization_url: data.data.authorization_url,
-    reference: data.data.reference,
-  });
+  if (error) return sendError(res, 'Could not create deposit request', 500);
+  try {
+    const link = await MoolreService.createPaymentLink(amount, reference, { user_id: req.user!.id, deposit_reference: reference });
+    return sendSuccess(res, { authorization_url: link.authorizationUrl, reference });
+  } catch (err) {
+    await supabase.from('deposit_requests').update({ status: 'rejected', notes: 'Moolre checkout creation failed' }).eq('reference', reference);
+    throw err;
+  }
 }));
 
-// POST /payments/paystack/webhook
-router.post('/paystack/webhook', asyncHandler(async (req, res) => {
-  const signature = req.headers['x-paystack-signature'] as string;
-  const payload = JSON.stringify(req.body);
-
-  const hash = crypto.createHmac('sha512', env.PAYSTACK_WEBHOOK_SECRET).update(payload).digest('hex');
-  if (hash !== signature) return res.status(400).json({ error: 'Invalid signature' });
-
-  const event = req.body;
-
-  if (event.event === 'charge.success') {
-    const reference = event.data.reference;
-    const { data: deposit } = await supabase
-      .from('deposit_requests').select('*').eq('reference', reference).single();
-
-    if (deposit && deposit.status === 'pending') {
-      await supabase.from('deposit_requests').update({ status: 'completed' }).eq('id', deposit.id);
-      await WalletService.credit(
-        deposit.user_id, deposit.amount, 'deposit', 'paystack', reference, 'Paystack deposit'
-      );
-      await NotificationService.send(deposit.user_id, 'deposit_approved',
-        'Deposit Approved', `Your deposit of GHS ${deposit.amount} has been credited.`);
-      AffiliateService.creditCpaCommission(deposit.user_id, deposit.amount, deposit.currency).catch(() => {});
+// Moolre does not provide a documented callback signature; never trust its body.
+// Every callback is independently verified against Moolre's status endpoint.
+router.post('/moolre/webhook', asyncHandler(async (req, res) => {
+  const payload = req.body as { data?: { externalref?: string } };
+  const reference = payload?.data?.externalref;
+  if (reference) {
+    const { data: deposit } = await supabase.from('deposit_requests').select('id, user_id, amount, reference, status')
+      .eq('payment_provider', 'moolre').eq('reference', reference).single();
+    if (deposit?.status === 'pending') {
+      const result = await MoolreService.verifyAndCredit(deposit);
+      if (result && !result.already_completed && result.user_id) {
+        await NotificationService.send(result.user_id, 'deposit_approved', 'Deposit Approved', `Your Moolre deposit of GHS ${result.amount} has been credited.`);
+        AffiliateService.creditCpaCommission(result.user_id, Number(result.amount), 'GHS').catch(() => {});
+      }
     }
   }
-
   return res.status(200).json({ received: true });
 }));
 
 // POST /payments/manual-momo/deposit
 router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(manualMomoSchema), asyncHandler(async (req, res) => {
+  return sendError(res, 'Manual MoMo deposits have been replaced by Moolre checkout', 410);
+  /* Historical request shape below is unreachable. */
   const { amount, provider, phone_number, sender_name, transaction_id, screenshot_url } = req.body;
 
   const { data: userRecord } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
@@ -187,7 +141,6 @@ router.post('/manual-momo/deposit', authenticate, paymentLimiter, validateBody(m
   // Lock wallet on first deposit. For a user whose wallet is already locked to a
   // different currency (e.g. NGN), the deposit is still accepted; the admin enters
   // the credited_amount (wallet-currency equivalent) at approval time.
-  await maybeLockWalletCurrency(req.user!.id, userRecord?.country ?? '', provider);
 
   // Store what target currency this deposit should be credited in so the admin sees it
   const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', req.user!.id).single();
@@ -218,7 +171,7 @@ router.post('/ng-bank/deposit', authenticate, paymentLimiter, validateBody(ngBan
 
   // Lock wallet on first deposit. If the wallet is already locked to a different
   // currency, the deposit is still accepted; admin enters credited_amount at approval.
-  await maybeLockWalletCurrency(req.user!.id, userRecord?.country ?? '', 'ng_bank_transfer');
+  if (userRecord?.country !== 'NG') return sendError(res, 'Manual bank deposits are currently available to Nigeria users only', 403);
 
   // Store target wallet currency so the admin sees what conversion is needed
   const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', req.user!.id).single();
@@ -246,8 +199,7 @@ router.post('/usdt-trc20/deposit', authenticate, paymentLimiter, validateBody(us
   const { amount_usd, tx_hash } = req.body;
 
   // Lock wallet to USD if this is the first deposit (crypto always → USD)
-  const { data: userRecord } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
-  await maybeLockWalletCurrency(req.user!.id, userRecord?.country ?? '', 'usdt_trc20');
+  // Currency is locked only after this crypto payment is approved.
 
   // Fetch the now-current wallet currency so we can store the right target currency
   const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', req.user!.id).single();
@@ -400,17 +352,10 @@ router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSche
 
   if (limit?.self_excluded) return sendError(res, 'Self-exclusion is active', 403);
 
-  await supabase.from('withdrawal_requests').insert({
-    user_id: req.user!.id,
-    amount,
-    currency: wallet.currency,
-    payment_provider,
-    account_details,
-    status: 'pending',
+  const { error: requestError } = await supabase.rpc('create_withdrawal_request', {
+    p_user_id: req.user!.id, p_amount: amount, p_provider: payment_provider, p_account_details: account_details,
   });
-
-  // Freeze amount (debit pending)
-  await WalletService.debit(req.user!.id, amount, 'withdrawal', 'Withdrawal request pending approval');
+  if (requestError) return sendError(res, requestError.message, 400);
 
   return sendSuccess(res, { message: 'Withdrawal request submitted. Awaiting admin approval.' }, 201);
 }));
@@ -508,8 +453,18 @@ router.post('/admin/deposits/:id/approve', authenticate, requireAdmin, validateB
   // For USDT deposits going into NGN or GHS wallets, the admin must supply
   // credited_amount (the local-currency equivalent). For USD wallets or direct
   // fiat deposits the original deposit.amount is used as-is.
-  const { data: walletRow } = await supabase.from('wallets').select('currency').eq('user_id', deposit.user_id).single();
-  const walletCurrency = walletRow?.currency ?? deposit.currency;
+  const { data: walletRow } = await supabase.from('wallets').select('id, currency, currency_locked').eq('user_id', deposit.user_id).single();
+  let walletCurrency = walletRow?.currency ?? deposit.currency;
+  // First verified deposit, not first request, chooses the wallet currency.
+  if (walletRow && !walletRow.currency_locked) {
+    const { data: user } = await supabase.from('users').select('country').eq('id', deposit.user_id).single();
+    const firstDepositCurrency = deposit.payment_provider === 'ng_bank_transfer' && user?.country === 'NG' ? 'NGN'
+      : deposit.payment_provider === 'usdt_trc20' ? 'USD'
+        : deposit.payment_provider.startsWith('momo_') && user?.country === 'GH' ? 'GHS'
+          : walletCurrency;
+    await supabase.from('wallets').update({ currency: firstDepositCurrency, currency_locked: true }).eq('id', walletRow.id);
+    walletCurrency = firstDepositCurrency;
+  }
   const amountToCredit = credited_amount ?? deposit.amount;
 
   // If deposit currency differs from wallet currency a conversion is required.
@@ -521,12 +476,15 @@ router.post('/admin/deposits/:id/approve', authenticate, requireAdmin, validateB
     return sendError(res, `Deposit is in ${deposit.currency} but wallet is ${walletCurrency}. Provide credited_amount (the ${walletCurrency} equivalent) to approve.`, 400);
   }
 
+  const { data: fxRate } = await supabase.from('currency_exchange_rates').select('usd_rate').eq('currency', walletCurrency).single();
+  const usdRate = Number(fxRate?.usd_rate ?? 1);
   await supabase.from('deposit_requests').update({
     status: 'approved', reviewed_by: req.user!.id,
     reviewed_at: new Date().toISOString(), notes,
+    metadata: { ...(deposit.metadata ?? {}), usd_rate: usdRate, usd_equivalent: Number((amountToCredit * usdRate).toFixed(2)) },
   }).eq('id', id);
 
-  await WalletService.credit(deposit.user_id, amountToCredit, 'deposit', deposit.payment_provider, undefined, `${deposit.payment_provider} deposit approved`);
+  await WalletService.credit(deposit.user_id, amountToCredit, 'deposit', deposit.payment_provider, undefined, `${deposit.payment_provider} deposit approved`, { usd_rate: usdRate, usd_equivalent: Number((amountToCredit * usdRate).toFixed(2)) });
   await NotificationService.send(deposit.user_id, 'deposit_approved', 'Deposit Approved', `Your deposit has been approved. ${walletCurrency} ${amountToCredit} has been credited to your account.`);
   AffiliateService.creditCpaCommission(deposit.user_id, amountToCredit, walletCurrency).catch(() => {});
 
@@ -688,6 +646,26 @@ router.post('/admin/withdrawals/:id/approve', authenticate, requireAdmin, valida
   await AdminLogService.log(req.user!.id, 'approve_withdrawal', 'withdrawal_request', id, { original_amount: withdrawal.amount, approved_amount: finalAmount, payout_reference });
 
   return sendSuccess(res, { message: 'Withdrawal approved' });
+}));
+
+// POST /payments/admin/withdrawals/:id/complete
+// Funds were already reserved at request time; this records the real-world payout.
+router.post('/admin/withdrawals/:id/complete', authenticate, requireAdmin, validateBody(z.object({
+  payout_reference: z.string().min(1), notes: z.string().optional(),
+})), asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { payout_reference, notes } = req.body;
+  const { data: withdrawal } = await supabase.from('withdrawal_requests').select('*').eq('id', id).single();
+  if (!withdrawal) return sendError(res, 'Withdrawal not found', 404);
+  if (withdrawal.status !== 'approved') return sendError(res, 'Only approved withdrawals can be marked completed', 400);
+  await supabase.from('withdrawal_requests').update({
+    status: 'completed', payout_reference, notes: notes ?? withdrawal.notes,
+    reviewed_by: req.user!.id, reviewed_at: new Date().toISOString(),
+  }).eq('id', id);
+  await supabase.from('payment_audit_logs').insert({ entity_type: 'withdrawal_request', entity_id: id, action: 'complete', admin_id: req.user!.id, previous_status: 'approved', new_status: 'completed', amount: withdrawal.amount, notes });
+  await NotificationService.send(withdrawal.user_id, 'withdrawal_approved', 'Withdrawal Completed', `Your withdrawal of ${withdrawal.currency} ${withdrawal.amount} has been paid.`);
+  await AdminLogService.log(req.user!.id, 'complete_withdrawal', 'withdrawal_request', id, { payout_reference, notes });
+  return sendSuccess(res, { message: 'Withdrawal marked completed' });
 }));
 
 // POST /payments/admin/withdrawals/:id/reject

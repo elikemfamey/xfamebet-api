@@ -19,6 +19,12 @@ export const env = {
   PAYSTACK_PUBLIC_KEY: process.env.PAYSTACK_PUBLIC_KEY!,
   PAYSTACK_WEBHOOK_SECRET: process.env.PAYSTACK_WEBHOOK_SECRET!,
 
+  // Moolre collection API. These must only exist on the API server.
+  MOOLRE_API_USER: process.env.MOOLRE_API_USER || '',
+  MOOLRE_PUBLIC_KEY: process.env.MOOLRE_PUBLIC_KEY || '',
+  MOOLRE_ACCOUNT_NUMBER: process.env.MOOLRE_ACCOUNT_NUMBER || '',
+  MOOLRE_BUSINESS_EMAIL: process.env.MOOLRE_BUSINESS_EMAIL || '',
+
   FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
   API_URL: process.env.API_URL || 'http://localhost:4000',
 
