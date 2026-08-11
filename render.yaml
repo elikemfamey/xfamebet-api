@@ -1,0 +1,87 @@
+services:
+  - type: web
+    name: xfamebet-api
+    runtime: node
+    rootDir: .
+    buildCommand: yarn install --frozen-lockfile && yarn build
+    startCommand: yarn start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_URL
+        value: https://xfamebet.com,https://www.xfamebet.com
+      # Set this after Render assigns the public service URL.
+      - key: API_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_PUBLIC_KEY
+        sync: false
+      - key: PAYSTACK_WEBHOOK_SECRET
+        sync: false
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: CRYPTO_WALLET_ADDRESS
+        sync: false
+      - key: BINANCE_UID
+        sync: false
+      - key: BINANCE_NAME
+        sync: false
+      - key: COMPANY_MOMO_NETWORK
+        sync: false
+      - key: COMPANY_MOMO_NAME
+        sync: false
+      - key: COMPANY_MOMO_NUMBER
+        sync: false
+      - key: COMPANY_BANK_NAME
+        sync: false
+      - key: COMPANY_BANK_ACCOUNT_NAME
+        sync: false
+      - key: COMPANY_BANK_ACCOUNT_NUMBER
+        sync: false
+      - key: COMPANY_BANK_CURRENCY
+        value: NGN
+      - key: ODDS_API_KEY
+        sync: false
+      - key: API_FOOTBALL_KEY
+        sync: false
+      - key: SPORTMONKS_API_TOKEN
+        sync: false
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "100"
+      - key: AT_API_KEY
+        sync: false
+      - key: AT_USERNAME
+        sync: false
+      - key: AT_SENDER_ID
+        sync: false
+      - key: TERMII_API_KEY
+        sync: false
+      - key: TERMII_SENDER_ID
+        value: XfameBet
