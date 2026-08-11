@@ -31,6 +31,15 @@ const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD:
 // ---------------------------------------------------------------------------
 
 const moolreInitSchema = z.object({ amount: z.number().positive().max(100000) });
+const moolreMobileMoneySchema = z.object({
+  amount: z.number().positive().max(100000),
+  network: z.enum(['mtn', 'telecel', 'airteltigo']),
+  phone_number: z.string().regex(/^0\d{9}$/, 'Use a 10-digit Ghana phone number beginning with 0'),
+});
+const moolreOtpSchema = z.object({
+  reference: z.string().min(1),
+  otp_code: z.string().min(3).max(12),
+});
 
 const manualMomoSchema = z.object({
   amount: z.number().min(5),
@@ -83,6 +92,61 @@ const approveDepositSchema = z.object({
 // Paystack is intentionally disabled. Historic records remain visible to admins.
 router.post('/paystack/initialize', authenticate, (_req, res) => sendError(res, 'Paystack is disabled. Use Moolre, bank transfer, or USDT.', 410));
 router.post('/paystack/webhook', (_req, res) => res.status(410).json({ error: 'Paystack is disabled' }));
+
+const MOOLRE_CHANNELS: Record<'mtn' | 'telecel' | 'airteltigo', string> = { mtn: '13', telecel: '6', airteltigo: '7' };
+
+async function getEligibleMoolreWallet(userId: string) {
+  const [{ data: user }, { data: wallet }] = await Promise.all([
+    supabase.from('users').select('country').eq('id', userId).single(),
+    supabase.from('wallets').select('currency, currency_locked').eq('user_id', userId).single(),
+  ]);
+  if (!user || !wallet) throw new Error('User wallet not found');
+  if (user.country !== 'GH') throw new Error('Moolre deposits are currently available to Ghana users only');
+  if (wallet.currency_locked && wallet.currency !== 'GHS') throw new Error('Moolre is available only for GHS wallets');
+  return wallet;
+}
+
+// POST /payments/moolre/mobile-money -- sends a MoMo approval prompt to the player's phone.
+router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(moolreMobileMoneySchema), asyncHandler(async (req, res) => {
+  if (!MoolreService.isConfigured()) return sendError(res, `Moolre is not configured. Missing: ${MoolreService.missingConfiguration().join(', ')}`, 503);
+  const { amount, network, phone_number } = req.body;
+  try { await getEligibleMoolreWallet(req.user!.id); }
+  catch (err) { return sendError(res, (err as Error).message, 400); }
+  const reference = `MLR-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const channel = MOOLRE_CHANNELS[network];
+  const { error } = await supabase.from('deposit_requests').insert({
+    user_id: req.user!.id, amount, currency: 'GHS', payment_provider: 'moolre', reference, account_number: phone_number,
+    status: 'pending', metadata: { network, channel, payment_mode: 'mobile_money_prompt' },
+  });
+  if (error) return sendError(res, 'Could not create deposit request', 500);
+  try {
+    const result = await MoolreService.requestMobileMoneyPayment({ amount, reference, phone: phone_number, channel });
+    await supabase.from('deposit_requests').update({ metadata: { network, channel, payment_mode: 'mobile_money_prompt', moolre_code: result.code } }).eq('reference', reference);
+    return sendSuccess(res, { reference, otp_required: result.code === 'TP14', message: result.message ?? 'Approve the payment prompt on your phone.' });
+  } catch (err) {
+    await supabase.from('deposit_requests').update({ status: 'rejected', notes: 'Moolre mobile money request failed' }).eq('reference', reference);
+    if (err instanceof MoolreApiError) return sendError(res, `Moolre rejected the payment request${err.providerCode ? ` (${err.providerCode})` : ''}: ${err.message}`, 502);
+    throw err;
+  }
+}));
+
+// POST /payments/moolre/mobile-money/otp -- completes Moolre's optional OTP step.
+router.post('/moolre/mobile-money/otp', authenticate, paymentLimiter, validateBody(moolreOtpSchema), asyncHandler(async (req, res) => {
+  const { reference, otp_code } = req.body;
+  const { data: deposit } = await supabase.from('deposit_requests').select('*').eq('user_id', req.user!.id)
+    .eq('payment_provider', 'moolre').eq('reference', reference).eq('status', 'pending').single();
+  if (!deposit) return sendError(res, 'Pending Moolre deposit not found', 404);
+  const metadata = (deposit.metadata ?? {}) as Record<string, string>;
+  const channel = metadata.channel;
+  if (!channel || !deposit.account_number) return sendError(res, 'Moolre payment details are incomplete', 400);
+  try {
+    const result = await MoolreService.requestMobileMoneyPayment({ amount: deposit.amount, reference, phone: deposit.account_number, channel, otpCode: otp_code });
+    return sendSuccess(res, { reference, message: result.message ?? 'OTP accepted. Approve the payment prompt if requested.' });
+  } catch (err) {
+    if (err instanceof MoolreApiError) return sendError(res, `Moolre rejected the OTP${err.providerCode ? ` (${err.providerCode})` : ''}: ${err.message}`, 502);
+    throw err;
+  }
+}));
 
 // POST /payments/moolre/initialize -- Ghana GHS checkout only.
 router.post('/moolre/initialize', authenticate, paymentLimiter, validateBody(moolreInitSchema), asyncHandler(async (req, res) => {

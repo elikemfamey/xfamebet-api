@@ -11,6 +11,12 @@ type MoolreStatus = {
   currency?: string;
 };
 
+export type MoolreCollectionResponse = {
+  code?: string;
+  message?: string | null;
+  data?: string;
+};
+
 export class MoolreApiError extends Error {
   constructor(public readonly providerCode: string | undefined, message: string) {
     super(message);
@@ -65,6 +71,23 @@ export class MoolreService {
     });
     const body = await response.json() as { status?: number; data?: MoolreStatus };
     return response.ok && body.status === 1 ? body.data ?? null : null;
+  }
+
+  static async requestMobileMoneyPayment(input: {
+    amount: number; reference: string; phone: string; channel: string; otpCode?: string;
+  }): Promise<MoolreCollectionResponse> {
+    if (!this.isConfigured()) throw new Error('Moolre is not configured');
+    const response = await fetch('https://api.moolre.com/open/transact/payment', {
+      method: 'POST', headers: this.headers(),
+      body: JSON.stringify({
+        type: 1, channel: input.channel, currency: 'GHS', payer: input.phone,
+        amount: input.amount.toFixed(2), externalref: input.reference,
+        ...(input.otpCode ? { otpcode: input.otpCode } : {}), accountnumber: env.MOOLRE_ACCOUNT_NUMBER,
+      }),
+    });
+    const body = await response.json() as { status?: number | string; code?: string; message?: string | null; data?: string };
+    if (!response.ok || Number(body.status) !== 1) throw new MoolreApiError(body.code, body.message || 'Moolre payment request failed');
+    return { code: body.code, message: body.message, data: body.data };
   }
 
   static isVerifiedSuccess(status: MoolreStatus | null, reference: string, amount: number): boolean {
