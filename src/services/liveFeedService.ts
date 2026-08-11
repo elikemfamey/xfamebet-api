@@ -330,7 +330,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     result.push({
       eventId: scriptEventId,
       oddsEventId: scriptEventId,
-      league: match.competition ?? match.league_name ?? 'XfameBet League',
+      league: match.competition ?? match.league_name ?? 'PrimeWin League',
       sport: match.sport ?? 'football',
       isLive: true,
       status: minuteLabel,

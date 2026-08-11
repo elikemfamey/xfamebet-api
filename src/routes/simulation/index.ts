@@ -143,7 +143,7 @@ const createSchema = z.object({
 
   // Match metadata
   sport:            z.string().default('football'),
-  competition:      z.string().default('XfameBet League'),
+  competition:      z.string().default('PrimeWin League'),
   venue:            z.string().optional(),
   duration_minutes: z.number().min(1).max(90).default(90),
 

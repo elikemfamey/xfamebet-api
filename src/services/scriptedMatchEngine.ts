@@ -272,7 +272,7 @@ function buildStateFromDb(match: Record<string, unknown>, fromMinute: number): M
     scoreB:   (match.team_b_score as number) ?? 0,
     minute:   fromMinute,
     duration: (match.duration_minutes as number) ?? 90,
-    league:   (match.competition as string) ?? (match.league_name as string) ?? 'XfameBet League',
+    league:   (match.competition as string) ?? (match.league_name as string) ?? 'PrimeWin League',
     sport:    (match.sport as string) ?? 'football',
     startsAt: (match.scheduled_at as string) ?? new Date().toISOString(),
     homeLogo: (match.home_logo as string | null) ?? null,
@@ -707,7 +707,7 @@ export class ScriptedMatchEngine {
     const home   = overrides?.homeOdds ?? (match as any).initial_home_odds ?? 1.90;
     const draw   = overrides?.drawOdds ?? (match as any).initial_draw_odds ?? 3.20;
     const away   = overrides?.awayOdds ?? (match as any).initial_away_odds ?? 1.90;
-    const league = (match as any).competition ?? match.league_name ?? 'XfameBet League';
+    const league = (match as any).competition ?? match.league_name ?? 'PrimeWin League';
     const sport  = match.sport ?? 'football';
     const startsAt = match.scheduled_at ?? new Date().toISOString();
     const markets: string[] = (match as any).markets ?? ['match_winner', 'over_under', 'btts'];

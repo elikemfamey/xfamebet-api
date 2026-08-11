@@ -170,7 +170,7 @@ router.post('/generate-link', requireAffiliate, validateBody(generateLinkSchema)
   const { data: user } = await supabase.from('users').select('referral_code').eq('id', req.user!.id).single();
   if (!user) return sendError(res, 'User not found', 404);
 
-  const baseUrl = (process.env.FRONTEND_URL ?? 'https://xfamebet.com').split(',')[0].trim();
+  const baseUrl = (process.env.FRONTEND_URL ?? 'https://www.primewin.site').split(',')[0].trim();
   const link = `${baseUrl}/register?ref=${user.referral_code}${campaign ? `&campaign=${encodeURIComponent(campaign)}` : ''}`;
 
   return sendSuccess(res, { link, referral_code: user.referral_code });

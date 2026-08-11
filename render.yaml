@@ -11,7 +11,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: FRONTEND_URL
-        value: https://xfamebet.com,https://www.xfamebet.com
+        value: https://primewin.site,https://www.primewin.site
       # Set this after Render assigns the public service URL.
       - key: API_URL
         sync: false
@@ -84,4 +84,4 @@ services:
       - key: TERMII_API_KEY
         sync: false
       - key: TERMII_SENDER_ID
-        value: XfameBet
+        value: PrimeWin

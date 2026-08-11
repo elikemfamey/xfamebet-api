@@ -142,7 +142,7 @@ export class SimulationEngine {
       cardProb: match.card_probability ?? 0.05,
       teamAStrength: match.team_a_strength ?? 5,
       teamBStrength: match.team_b_strength ?? 5,
-      league: (match as any).competition ?? match.league_name ?? 'XfameBet Virtual League',
+      league: (match as any).competition ?? match.league_name ?? 'PrimeWin Virtual League',
       sport: match.sport ?? 'virtual_football',
       startsAt: match.scheduled_at ?? new Date().toISOString(),
       possession: { a: 50, b: 50 },
@@ -356,7 +356,7 @@ export class SimulationEngine {
         cardProb: match.card_probability ?? 0.05,
         teamAStrength: match.team_a_strength ?? 5,
         teamBStrength: match.team_b_strength ?? 5,
-        league: (match as any).competition ?? match.league_name ?? 'XfameBet Virtual League',
+        league: (match as any).competition ?? match.league_name ?? 'PrimeWin Virtual League',
         sport: match.sport ?? 'virtual_football',
         startsAt: match.scheduled_at ?? new Date().toISOString(),
         possession: { a: 50, b: 50 },
@@ -479,7 +479,7 @@ export class SimulationEngine {
         cardProb: match.card_probability ?? 0.05,
         teamAStrength: match.team_a_strength ?? 5,
         teamBStrength: match.team_b_strength ?? 5,
-        league: (match as any).competition ?? match.league_name ?? 'XfameBet Virtual League',
+        league: (match as any).competition ?? match.league_name ?? 'PrimeWin Virtual League',
         sport: match.sport ?? 'virtual_football',
         startsAt: match.scheduled_at ?? new Date().toISOString(),
         possession: { a: 50, b: 50 },
@@ -644,7 +644,7 @@ export class SimulationEngine {
       .single();
     if (!match) return;
 
-    const league = (match as any).competition ?? match.league_name ?? 'XfameBet Virtual League';
+    const league = (match as any).competition ?? match.league_name ?? 'PrimeWin Virtual League';
     const startsAt = match.scheduled_at ?? new Date().toISOString();
     const sport = match.sport ?? 'virtual_football';
     const base = {

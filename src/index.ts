@@ -45,7 +45,7 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: (origin, callback) => {
-    const isVercelPreview = !!origin && /^https:\/\/xfamebet.*\.vercel\.app$/.test(origin);
+    const isVercelPreview = !!origin && /^https:\/\/primewin.*\.vercel\.app$/.test(origin);
     if (!origin || allowedOrigins.includes(origin) || isVercelPreview) {
       callback(null, true);
     } else {

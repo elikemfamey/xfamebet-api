@@ -32,7 +32,7 @@ export const env = {
   SMTP_PORT: parseInt(process.env.SMTP_PORT || '587', 10),
   SMTP_USER: process.env.SMTP_USER || '',
   SMTP_PASS: process.env.SMTP_PASS || '',
-  SMTP_FROM: process.env.SMTP_FROM || 'noreply@xfamebet.com',
+  SMTP_FROM: process.env.SMTP_FROM || 'support@primewin.site',
 
   CRYPTO_WALLET_ADDRESS: process.env.CRYPTO_WALLET_ADDRESS || '',
   BINANCE_UID: process.env.BINANCE_UID || '',
@@ -59,7 +59,7 @@ export const env = {
   AT_SENDER_ID: process.env.AT_SENDER_ID || '',
 
   TERMII_API_KEY: process.env.TERMII_API_KEY || '',
-  TERMII_SENDER_ID: process.env.TERMII_SENDER_ID || 'XfameBet',
+  TERMII_SENDER_ID: process.env.TERMII_SENDER_ID || 'PrimeWin',
 };
 
 export function validateEnv() {
