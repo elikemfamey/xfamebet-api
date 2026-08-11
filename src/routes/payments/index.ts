@@ -122,7 +122,10 @@ router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(m
   try {
     const result = await MoolreService.requestMobileMoneyPayment({ amount, reference, phone: phone_number, channel });
     await supabase.from('deposit_requests').update({ metadata: { network, channel, payment_mode: 'mobile_money_prompt', moolre_code: result.code } }).eq('reference', reference);
-    return sendSuccess(res, { reference, otp_required: result.code === 'TP14', message: result.message ?? 'Approve the payment prompt on your phone.' });
+    return sendSuccess(res, {
+      reference, code: result.code, otp_required: result.code === 'TP14', prompt_sent: result.code === 'TR099',
+      message: result.message ?? (result.code === 'TR099' ? 'Payment prompt sent.' : 'Moolre requires additional verification.'),
+    });
   } catch (err) {
     await supabase.from('deposit_requests').update({ status: 'rejected', notes: 'Moolre mobile money request failed' }).eq('reference', reference);
     if (err instanceof MoolreApiError) return sendError(res, `Moolre rejected the payment request${err.providerCode ? ` (${err.providerCode})` : ''}: ${err.message}`, 502);
@@ -141,7 +144,10 @@ router.post('/moolre/mobile-money/otp', authenticate, paymentLimiter, validateBo
   if (!channel || !deposit.account_number) return sendError(res, 'Moolre payment details are incomplete', 400);
   try {
     const result = await MoolreService.requestMobileMoneyPayment({ amount: deposit.amount, reference, phone: deposit.account_number, channel, otpCode: otp_code });
-    return sendSuccess(res, { reference, message: result.message ?? 'OTP accepted. Approve the payment prompt if requested.' });
+    return sendSuccess(res, {
+      reference, code: result.code, otp_required: result.code === 'TP14', prompt_sent: result.code === 'TR099',
+      message: result.message ?? (result.code === 'TR099' ? 'Payment prompt sent.' : 'Moolre did not yet initiate the payment prompt.'),
+    });
   } catch (err) {
     if (err instanceof MoolreApiError) return sendError(res, `Moolre rejected the OTP${err.providerCode ? ` (${err.providerCode})` : ''}: ${err.message}`, 502);
     throw err;
