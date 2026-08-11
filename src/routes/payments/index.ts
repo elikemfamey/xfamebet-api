@@ -113,7 +113,7 @@ router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(m
   try { await getEligibleMoolreWallet(req.user!.id); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
   const reference = `MLR-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const channel = MOOLRE_CHANNELS[network];
+  const channel = MOOLRE_CHANNELS[network as keyof typeof MOOLRE_CHANNELS];
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id, amount, currency: 'GHS', payment_provider: 'moolre', reference, account_number: phone_number,
     status: 'pending', metadata: { network, channel, payment_mode: 'mobile_money_prompt' },
