@@ -159,6 +159,21 @@ router.post('/moolre/mobile-money/otp', authenticate, paymentLimiter, validateBo
   }
 }));
 
+// POST /payments/moolre/:reference/verify -- player-triggered immediate status check.
+router.post('/moolre/:reference/verify', authenticate, paymentLimiter, asyncHandler(async (req, res) => {
+  const { data: deposit } = await supabase.from('deposit_requests').select('id, user_id, amount, reference, status')
+    .eq('reference', req.params.reference).eq('user_id', req.user!.id).eq('payment_provider', 'moolre').single();
+  if (!deposit) return sendError(res, 'Moolre deposit not found', 404);
+  if (deposit.status === 'completed') return sendSuccess(res, { status: 'completed', credited: false });
+  const result = await MoolreService.verifyAndCredit(deposit);
+  if (result && !result.already_completed && result.user_id) {
+    await NotificationService.send(result.user_id, 'deposit_approved', 'Deposit Approved', `Your Moolre deposit of GHS ${result.amount} has been credited.`);
+    AffiliateService.creditCpaCommission(result.user_id, Number(result.amount), 'GHS').catch(() => {});
+    return sendSuccess(res, { status: 'completed', credited: true });
+  }
+  return sendSuccess(res, { status: 'pending', credited: false, message: 'Payment is still being confirmed by Moolre.' });
+}));
+
 // POST /payments/moolre/initialize -- Ghana GHS checkout only.
 router.post('/moolre/initialize', authenticate, paymentLimiter, validateBody(moolreInitSchema), asyncHandler(async (req, res) => {
   if (!MoolreService.isConfigured()) {
