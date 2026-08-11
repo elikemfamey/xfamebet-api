@@ -86,7 +86,9 @@ router.post('/paystack/webhook', (_req, res) => res.status(410).json({ error: 'P
 
 // POST /payments/moolre/initialize -- Ghana GHS checkout only.
 router.post('/moolre/initialize', authenticate, paymentLimiter, validateBody(moolreInitSchema), asyncHandler(async (req, res) => {
-  if (!MoolreService.isConfigured()) return sendError(res, 'Moolre is not configured', 503);
+  if (!MoolreService.isConfigured()) {
+    return sendError(res, `Moolre is not configured. Missing: ${MoolreService.missingConfiguration().join(', ')}`, 503);
+  }
   const { amount } = req.body;
   const [{ data: user }, { data: wallet }] = await Promise.all([
     supabase.from('users').select('country').eq('id', req.user!.id).single(),

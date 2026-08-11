@@ -12,8 +12,17 @@ type MoolreStatus = {
 };
 
 export class MoolreService {
+  static missingConfiguration(): string[] {
+    return [
+      ['MOOLRE_API_USER', env.MOOLRE_API_USER],
+      ['MOOLRE_PUBLIC_KEY', env.MOOLRE_PUBLIC_KEY],
+      ['MOOLRE_ACCOUNT_NUMBER', env.MOOLRE_ACCOUNT_NUMBER],
+      ['MOOLRE_BUSINESS_EMAIL', env.MOOLRE_BUSINESS_EMAIL],
+    ].filter(([, value]) => !value?.trim()).map(([name]) => name);
+  }
+
   static isConfigured(): boolean {
-    return !!(env.MOOLRE_API_USER && env.MOOLRE_PUBLIC_KEY && env.MOOLRE_ACCOUNT_NUMBER && env.MOOLRE_BUSINESS_EMAIL);
+    return this.missingConfiguration().length === 0;
   }
 
   private static headers() {
