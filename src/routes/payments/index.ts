@@ -11,7 +11,7 @@ import { paymentLimiter } from '../../middleware/rateLimiter';
 import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
 import { AffiliateService } from '../../services/affiliateService';
-import { MoolreService } from '../../services/moolreService';
+import { MoolreApiError, MoolreService } from '../../services/moolreService';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -109,6 +109,9 @@ router.post('/moolre/initialize', authenticate, paymentLimiter, validateBody(moo
     return sendSuccess(res, { authorization_url: link.authorizationUrl, reference });
   } catch (err) {
     await supabase.from('deposit_requests').update({ status: 'rejected', notes: 'Moolre checkout creation failed' }).eq('reference', reference);
+    if (err instanceof MoolreApiError) {
+      return sendError(res, `Moolre rejected the checkout request${err.providerCode ? ` (${err.providerCode})` : ''}: ${err.message}`, 502);
+    }
     throw err;
   }
 }));

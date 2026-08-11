@@ -11,6 +11,12 @@ type MoolreStatus = {
   currency?: string;
 };
 
+export class MoolreApiError extends Error {
+  constructor(public readonly providerCode: string | undefined, message: string) {
+    super(message);
+  }
+}
+
 export class MoolreService {
   static missingConfiguration(): string[] {
     return [
@@ -44,8 +50,10 @@ export class MoolreService {
         currency: 'GHS', accountnumber: env.MOOLRE_ACCOUNT_NUMBER, metadata,
       }),
     });
-    const body = await response.json() as { status?: number; message?: string; data?: { authorization_url?: string; reference?: string } };
-    if (!response.ok || body.status !== 1 || !body.data?.authorization_url) throw new Error(body.message || 'Moolre link creation failed');
+    const body = await response.json() as { status?: number; code?: string; message?: string; data?: { authorization_url?: string; reference?: string } };
+    if (!response.ok || body.status !== 1 || !body.data?.authorization_url) {
+      throw new MoolreApiError(body.code, body.message || 'Moolre link creation failed');
+    }
     return { authorizationUrl: body.data.authorization_url, reference: body.data.reference ?? reference };
   }
 
