@@ -63,7 +63,7 @@ router.get('/featured', async (_req, res) => {
     .from('simulated_matches')
     .select('id, team_a, team_b, sport, league_name, competition, country_code, scheduled_at, started_at, status, team_a_score, team_b_score, current_minute, home_logo, away_logo')
     .in('status', ['live', 'scheduled'])
-    .not('sport', 'ilike', 'virtual_%')
+    .order('scheduled_at', { ascending: true })
     .limit(9);
 
   if (!matches?.length) return sendSuccess(res, { matches: [], odds: [] });
