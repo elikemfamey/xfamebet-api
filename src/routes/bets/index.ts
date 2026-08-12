@@ -71,12 +71,21 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
   // Validate odds still active
   for (const sel of selections) {
     const { data: oddsData } = await supabase
-      .from('odds_feed').select('odds_value, status')
+      .from('odds_feed').select('odds_value, status, is_live, provider_updated_at, updated_at')
       .eq('event_id', sel.event_id).eq('market_type', sel.market_type)
       .eq('selection', sel.selection).single();
 
     if (!oddsData || oddsData.status !== 'active') {
       return sendError(res, `Odds for ${sel.event_name} - ${sel.selection} are no longer available`, 400);
+    }
+
+    // A canonical live event may only be accepted from a fresh verified in-play snapshot.
+    if (sel.event_id.startsWith('live:football:')) {
+      const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
+      const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > 45_000;
+      if (!oddsData.is_live || stale) {
+        return sendError(res, `Live odds for ${sel.event_name} are temporarily suspended. Please try again.`, 400);
+      }
     }
 
     // Validate odds haven't moved significantly (anti-latency betting)

@@ -17,6 +17,8 @@ export interface LiveScore {
   status_short: string; // '1H', 'HT', '2H', 'ET', 'BT', 'P', 'FT'
   league: string;
   country: string;
+  provider?: 'api_football' | 'sportmonks';
+  starts_at?: string | null;
 }
 
 const REDIS_KEY = 'scores:live:all';
@@ -103,8 +105,7 @@ function parseFixtureEvents(fixture: any): any[] {
 
 export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
   if (!env.API_FOOTBALL_KEY) {
-    logger.debug('[LiveScores] API_FOOTBALL_KEY not configured, skipping');
-    return [];
+    throw new Error('API_FOOTBALL_KEY not configured');
   }
 
   try {
@@ -128,9 +129,11 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
       status_short: f.fixture.status.short ?? '',
       league: f.league.name,
       country: f.league.country,
+      provider: 'api_football',
+      starts_at: f.fixture.date ?? null,
     }));
 
-    if (scores.length > 0) {
+    {
       await redis.setex(REDIS_KEY, TTL, JSON.stringify(scores));
       logger.info(`[LiveScores] Cached ${scores.length} live matches`);
 
@@ -162,7 +165,7 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
     return scores;
   } catch (err: any) {
     logger.error('[LiveScores] Fetch error', { message: err.message });
-    return [];
+    throw err;
   }
 }
 

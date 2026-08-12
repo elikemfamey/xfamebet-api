@@ -1,9 +1,12 @@
 import cron from 'node-cron';
 import { supabase } from '../config/supabase';
+import { redis } from '../config/redis';
 import { ingestAllOdds, getActiveSports } from '../services/oddsIngestionService';
 import { fetchAndCacheLiveScores as fetchFromSportMonks, fetchLatestLiveScoreUpdates } from '../services/sportmonksLiveScoreService';
-import { fetchAndCacheLiveScores as fetchFromApiFootball } from '../services/liveScoreService';
+import { fetchAndCacheLiveScores as fetchFromApiFootball, getCachedLiveScores } from '../services/liveScoreService';
 import { fetchAllSportsScores } from '../services/oddsApiScoreService';
+import { ensureSportMonksFixtureMapping, resolveCanonicalEventId } from '../services/liveFixtureIdentityService';
+import { ingestLiveOddsForEvents } from '../services/sportmonksLiveOddsService';
 import { settlePendingBets } from '../services/betSettlementService';
 import { SimulationEngine } from '../services/simulationEngine';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
@@ -13,11 +16,23 @@ import { MoolreService } from '../services/moolreService';
 
 async function fetchLiveScores(): Promise<void> {
   try {
-    await fetchFromSportMonks();
-  } catch (smErr: any) {
-    logger.warn('[LiveScores] SportMonks failed, falling back to api-football', { message: smErr.message });
     await fetchFromApiFootball();
+    await redis.set('live_scores:provider_health', JSON.stringify({ activeSource: 'api_football', lastSuccessAt: new Date().toISOString(), lastFailureAt: null }));
+  } catch (apiErr: any) {
+    logger.warn('[LiveScores] API-Football failed, falling back to SportMonks', { message: apiErr.message });
+    await fetchFromSportMonks();
+    await redis.set('live_scores:provider_health', JSON.stringify({ activeSource: 'sportmonks', lastSuccessAt: new Date().toISOString(), lastFailureAt: new Date().toISOString(), lastFailure: apiErr.message }));
   }
+}
+
+async function fetchLiveOdds(): Promise<void> {
+  const scores = await getCachedLiveScores();
+  const events = await Promise.all(scores.map(async score => {
+    const eventId = await resolveCanonicalEventId(score);
+    await ensureSportMonksFixtureMapping(score, eventId);
+    return { eventId, eventName: `${score.home_team} vs ${score.away_team}`, league: score.league || null, startsAt: score.starts_at ?? null };
+  }));
+  await ingestLiveOddsForEvents(events);
 }
 
 export function startWorkers() {
@@ -147,23 +162,17 @@ export function startWorkers() {
   });
 
   // Fetch live scores every minute — SportMonks primary, api-football fallback
-  cron.schedule('* * * * *', async () => {
+  setInterval(async () => {
     try {
       await fetchLiveScores();
     } catch (err) {
       logger.error('Live scores worker error', { err });
     }
-  });
+  }, 30_000);
 
   // Poll SportMonks /livescores/latest every 15 seconds for incremental updates
   // (only fixtures that changed in the last 10s — cheap, high-frequency)
-  setInterval(async () => {
-    try {
-      await fetchLatestLiveScoreUpdates();
-    } catch (err: any) {
-      logger.debug('[LiveScores] Latest-update poll error', { message: err.message });
-    }
-  }, 15_000);
+  setInterval(() => { fetchLiveOdds().catch(err => logger.warn('Live odds worker error', { err })); }, 15_000);
 
   // Fetch Odds API scores for all active sports every 2 minutes (covers all sports)
   cron.schedule('*/2 * * * *', async () => {
@@ -189,6 +198,7 @@ export function startWorkers() {
     try {
       await ingestAllOdds();
       await fetchLiveScores();
+      await fetchLiveOdds();
       const sports = await getActiveSports();
       await fetchAllSportsScores(sports.map(s => s.key));
       await refreshPopularMatches();

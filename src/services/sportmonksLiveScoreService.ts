@@ -146,8 +146,7 @@ function buildDescription(typeName: string, playerName: string | null, relatedNa
 
 export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
   if (!env.SPORTMONKS_API_TOKEN) {
-    logger.debug('[SportMonks] SPORTMONKS_API_TOKEN not configured, skipping');
-    return [];
+    throw new Error('SPORTMONKS_API_TOKEN not configured');
   }
 
   const resp = await axios.get(`${BASE_URL}/livescores/inplay`, {
@@ -190,13 +189,15 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
       status_short: statusShort,
       league: f.league?.name ?? '',
       country: f.league?.country?.name ?? '',
+      provider: 'sportmonks',
+      starts_at: f.starting_at ?? null,
     };
 
     scores.push(ls);
     enriched.push({ fixture: f, homeId: home.id, ls });
   }
 
-  if (scores.length > 0) {
+  {
     await redis.setex(REDIS_KEY, TTL, JSON.stringify(scores));
     logger.info(`[SportMonks] Cached ${scores.length} live matches`);
 
