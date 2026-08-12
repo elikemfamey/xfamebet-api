@@ -48,6 +48,9 @@ export const env = {
   COMPANY_BANK_CURRENCY: process.env.COMPANY_BANK_CURRENCY || 'NGN',
 
   ODDS_API_KEY: process.env.ODDS_API_KEY || '',
+  // Odds-API.io is a separate provider from The Odds API above. Keep this
+  // server-only; it must never be exposed through the web application.
+  ODDS_API_IO_KEY: process.env.ODDS_API_IO_KEY || '',
   API_FOOTBALL_KEY: process.env.API_FOOTBALL_KEY || '',
   SPORTMONKS_API_TOKEN: process.env.SPORTMONKS_API_TOKEN || '',
 

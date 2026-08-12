@@ -2,7 +2,7 @@ import { supabase } from '../config/supabase';
 import { getCachedLiveScores, LiveScore } from './liveScoreService';
 import { getAllCachedOddsApiScores, OddsApiScoreEntry } from './oddsApiScoreService';
 import { resolveCanonicalEventId } from './liveFixtureIdentityService';
-import { areLiveOddsFresh } from './sportmonksLiveOddsService';
+import { isOddsApiIoLiveFresh } from './oddsApiIoFallbackService';
 
 export interface LiveFeedTeam { name: string; logoUrl: string | null; }
 export interface LiveFeedMatch {
@@ -13,7 +13,7 @@ export interface LiveFeedMatch {
   kickedOffAt: string | null; countryCode?: string | null;
   apiFootballFixtureId?: number | null; competitionKey?: string | null; country?: string | null;
 }
-interface OddsRow { event_id: string; event_name: string; market_type: string; selection: string; odds_value: number; sport: string; league: string | null; starts_at: string | null; status: string; provider_updated_at?: string | null; updated_at?: string | null; is_live?: boolean; }
+interface OddsRow { event_id: string; event_name: string; market_type: string; selection: string; odds_value: number; sport: string; league: string | null; starts_at: string | null; status: string; source?: string | null; provider_updated_at?: string | null; updated_at?: string | null; is_live?: boolean; }
 const IN_PLAY = new Set(['1H', 'HT', '2H', 'ET', 'BT', 'P', 'INT']);
 const NO_DRAW = new Set(['basketball', 'tennis', 'american_football', 'baseball', 'ice_hockey', 'mma', 'golf', 'horse_racing', 'aussie_rules', 'boxing', 'greyhound']);
 const sportFromKey = (key: string) => ({ soccer: 'football', basketball: 'basketball', tennis: 'tennis', americanfootball: 'american_football', baseball: 'baseball', icehockey: 'ice_hockey', cricket: 'cricket', rugbyunion: 'rugby', rugbyleague: 'rugby_league', mma: 'mma', golf: 'golf', aussierules: 'aussie_rules', boxing: 'boxing' }[key.split('_')[0]] ?? 'football');
@@ -24,7 +24,7 @@ function scoreFor(entry: OddsApiScoreEntry, side: 'home' | 'away') { const team 
 export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
   const [footballScores, oddsScores, oddsResult, simulations] = await Promise.all([
     getCachedLiveScores(), getAllCachedOddsApiScores(),
-    supabase.from('odds_feed').select('event_id,event_name,market_type,selection,odds_value,sport,league,starts_at,status,provider_updated_at,updated_at,is_live').in('status', ['active', 'suspended']).limit(2000),
+    supabase.from('odds_feed').select('event_id,event_name,market_type,selection,odds_value,sport,league,starts_at,status,source,provider_updated_at,updated_at,is_live').in('status', ['active', 'suspended']).limit(2000),
     supabase.from('simulated_matches').select('id,team_a,team_b,team_a_score,team_b_score,current_minute,sport,competition,league_name,country_code,home_logo,away_logo,started_at').eq('status', 'live'),
   ]);
   const byEvent = new Map<string, OddsRow[]>();
@@ -36,10 +36,15 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     if (!IN_PLAY.has(score.status_short)) continue;
     const eventId = await resolveCanonicalEventId(score);
     const liveRows = (byEvent.get(eventId) ?? []).filter(row => row.is_live === true);
-    const fresh = areLiveOddsFresh(liveRows);
-    const prices = fresh ? h2h(liveRows.filter(row => row.status === 'active')) : { home: undefined, draw: undefined, away: undefined };
+    const apiRows = liveRows.filter(row => row.source === 'api_football_live');
+    const fallbackRows = liveRows.filter(row => row.source === 'odds_api_io_live');
+    const apiFresh = apiRows.some(row => isOddsApiIoLiveFresh(row));
+    const fallbackFresh = fallbackRows.some(row => isOddsApiIoLiveFresh(row));
+    const selectedRows = apiFresh ? apiRows : fallbackFresh ? fallbackRows : liveRows;
+    const fresh = apiFresh || fallbackFresh;
+    const prices = fresh ? h2h(selectedRows.filter(row => row.status === 'active')) : { home: undefined, draw: undefined, away: undefined };
     const locked = !fresh || prices.home == null || prices.away == null;
-    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: [locked ? '-' : prices.home!, locked ? '-' : prices.draw ?? '-', locked ? '-' : prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Live markets are temporarily suspended while verified odds are unavailable.' : undefined, markets: locked ? 0 : liveRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null, apiFootballFixtureId: score.fixture_id, competitionKey: score.competition_key ?? `api-football:${score.league}`, country: score.country ?? null });
+    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: [locked ? '-' : prices.home!, locked ? '-' : prices.draw ?? '-', locked ? '-' : prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Live markets are temporarily suspended while verified odds are unavailable.' : undefined, markets: locked ? 0 : selectedRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null, apiFootballFixtureId: score.fixture_id, competitionKey: score.competition_key ?? `api-football:${score.league}`, country: score.country ?? null });
   }
 
   // Other sports require a score-bearing Odds API entry; football is deliberately excluded above.

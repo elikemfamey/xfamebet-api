@@ -82,8 +82,10 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
     // A canonical live event may only be accepted from a fresh verified in-play snapshot.
     if (sel.event_id.startsWith('live:football:')) {
       const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
-      const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > 45_000;
-      if (!oddsData.is_live || stale) {
+      const freshness = oddsData.source === 'odds_api_io_live' ? 4 * 60_000 : 45_000;
+      const verifiedSource = oddsData.source === 'api_football_live' || oddsData.source === 'odds_api_io_live';
+      const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > freshness;
+      if (!oddsData.is_live || stale || !verifiedSource) {
         return sendError(res, `Live odds for ${sel.event_name} are temporarily suspended. Please try again.`, 400);
       }
     }
@@ -92,8 +94,9 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
     // intentionally separate from live freshness and excludes legacy events.
     if (sel.event_id.startsWith('upcoming:football:')) {
       const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
-      const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > 60 * 60_000;
-      const verifiedSource = oddsData.source === 'api_football_upcoming';
+      const freshness = oddsData.source === 'odds_api_io_upcoming' ? 24 * 60 * 60_000 : 60 * 60_000;
+      const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > freshness;
+      const verifiedSource = oddsData.source === 'api_football_upcoming' || oddsData.source === 'odds_api_io_upcoming';
       if (oddsData.is_live || stale || !verifiedSource) {
         return sendError(res, `Upcoming odds for ${sel.event_name} are temporarily suspended. Please refresh.`, 400);
       }

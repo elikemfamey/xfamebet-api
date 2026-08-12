@@ -4,10 +4,15 @@ import { redis, REDIS_KEYS } from '../config/redis';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { broadcastOddsUpdate } from '../socket';
+import { isUpcomingFallbackFresh, refreshOddsApiIoUpcomingFallback } from './oddsApiIoFallbackService';
 
 export const UPCOMING_ODDS_MAX_AGE_MS = 60 * 60 * 1000;
 const HEALTH_KEY = 'upcoming_football:provider_health';
-export const UPCOMING_FIXTURE_WINDOW_DAYS = 14;
+export const UPCOMING_FIXTURE_WINDOW_DAYS = 30;
+// API-Football publishes pre-match odds only up to 14 days before kickoff.
+// The fixture catalogue remains one month wide; later fixtures are visible
+// with suspended markets until verified prices become available.
+const UPCOMING_ODDS_WINDOW_DAYS = 14;
 
 type Mapping = { canonical_event_id: string; sportmonks_fixture_id?: number | null; api_football_fixture_id?: number | null; odds_api_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_key: string; competition_name: string; country_name?: string | null };
 
@@ -84,7 +89,7 @@ async function ingestApiFootballUpcomingOdds() {
   }
 
   let pricedEvents = 0;
-  for (const date of dates) {
+  for (const date of dates.slice(0, UPCOMING_ODDS_WINDOW_DAYS)) {
     for (let page = 1; page <= 10; page++) {
       const response = await axios.get('https://v3.football.api-sports.io/odds', { params: { date, page }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000 });
       const events = response.data?.response;
@@ -105,9 +110,12 @@ async function ingestApiFootballUpcomingOdds() {
 
 export async function expireStaleUpcomingFootballOdds(): Promise<void> {
   const cutoff = new Date(Date.now() - UPCOMING_ODDS_MAX_AGE_MS).toISOString();
-  const { data } = await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: 'Markets suspended because the verified price is over one hour old.', updated_at: new Date().toISOString() })
+  const { data } = await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: 'Markets suspended because the verified API-Football price is over one hour old.', updated_at: new Date().toISOString() })
     .eq('sport', 'football').eq('is_live', false).in('source', ['api_football_upcoming']).eq('status', 'active').lt('provider_updated_at', cutoff).select('event_id');
-  const ids = [...new Set((data ?? []).map(row => row.event_id))];
+  const fallbackCutoff = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+  const { data: fallbackData } = await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: 'Markets suspended because the verified fallback price is over 24 hours old.', updated_at: new Date().toISOString() })
+    .eq('sport', 'football').eq('is_live', false).eq('source', 'odds_api_io_upcoming').eq('status', 'active').lt('provider_updated_at', fallbackCutoff).select('event_id');
+  const ids = [...new Set([...(data ?? []), ...(fallbackData ?? [])].map(row => row.event_id))];
   if (ids.length) await clearCaches(ids);
 }
 
@@ -115,6 +123,7 @@ export async function ingestUpcomingFootballOdds(): Promise<void> {
   const startedAt = new Date().toISOString();
   try {
     await ingestApiFootballUpcomingOdds();
+    await refreshOddsApiIoUpcomingFallback();
     await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football', lastSuccessAt: startedAt, lastFailureAt: null, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
   } catch (error: any) {
     // Keep the last accepted API-Football snapshot through its one-hour
@@ -124,6 +133,7 @@ export async function ingestUpcomingFootballOdds(): Promise<void> {
     let lastSuccessAt: string | null = null;
     try { lastSuccessAt = previous ? JSON.parse(previous).lastSuccessAt ?? null : null; } catch { /* ignore corrupt health metadata */ }
     await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football_unavailable', lastSuccessAt, lastFailureAt: startedAt, lastFailure: error.message, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
+    await refreshOddsApiIoUpcomingFallback();
   }
   await expireStaleUpcomingFootballOdds();
 }
@@ -143,11 +153,16 @@ export async function getUpcomingFootballFixtures(liveFixtureIds: number[] = [])
     return [];
   }
   const ids = mappings.map(row => row.canonical_event_id);
-  const { data: rows } = ids.length ? await supabase.from('odds_feed').select('*').in('event_id', ids).eq('is_live', false).eq('source', 'api_football_upcoming').in('status', ['active', 'suspended']) : { data: [] as any[] };
+  const { data: rows } = ids.length ? await supabase.from('odds_feed').select('*').in('event_id', ids).eq('is_live', false).in('source', ['api_football_upcoming', 'odds_api_io_upcoming']).in('status', ['active', 'suspended']) : { data: [] as any[] };
   const byEvent = new Map<string, any[]>(); for (const row of rows ?? []) byEvent.set(row.event_id, [...(byEvent.get(row.event_id) ?? []), row]);
   const canonicalFixtures = mappings.map((mapping: Mapping) => {
-    const odds = byEvent.get(mapping.canonical_event_id) ?? [];
-    const fresh = odds.some(row => row.status === 'active' && row.provider_updated_at && Date.now() - new Date(row.provider_updated_at).getTime() <= UPCOMING_ODDS_MAX_AGE_MS);
+    const allOdds = byEvent.get(mapping.canonical_event_id) ?? [];
+    const apiOdds = allOdds.filter(row => row.source === 'api_football_upcoming');
+    const fallbackOdds = allOdds.filter(row => row.source === 'odds_api_io_upcoming');
+    const primaryFresh = apiOdds.some(row => row.status === 'active' && row.provider_updated_at && Date.now() - new Date(row.provider_updated_at).getTime() <= UPCOMING_ODDS_MAX_AGE_MS);
+    const fallbackFresh = fallbackOdds.some(row => row.status === 'active' && isUpcomingFallbackFresh(row));
+    const odds = primaryFresh ? apiOdds : fallbackFresh ? fallbackOdds : allOdds;
+    const fresh = primaryFresh || fallbackFresh;
     return { eventId: mapping.canonical_event_id, apiFootballFixtureId: mapping.api_football_fixture_id ?? null, home: mapping.home_team, away: mapping.away_team, startsAt: mapping.starts_at, sport: 'football', competitionKey: mapping.competition_key, competitionName: mapping.competition_name, country: mapping.country_name ?? null,
       oddsStatus: fresh ? 'active' : 'suspended', oddsLockReason: fresh ? undefined : odds[0]?.lock_reason ?? 'Markets suspended while verified prices are unavailable.', odds };
   });

@@ -21,6 +21,23 @@ export async function resolveCanonicalEventId(score: LiveScore): Promise<string>
     .select('canonical_event_id').eq(providerColumn, score.fixture_id).maybeSingle();
   if (existing?.canonical_event_id) return existing.canonical_event_id;
 
+  // A fixture first catalogued as upcoming must keep exactly the same public
+  // event id when it becomes live. This also carries its persisted fallback
+  // provider mapping into the live odds worker.
+  if (provider === 'api_football') {
+    const { data: upcoming } = await supabase.from('upcoming_football_fixture_mappings')
+      .select('canonical_event_id,odds_api_io_event_id').eq('api_football_fixture_id', score.fixture_id).maybeSingle();
+    if (upcoming?.canonical_event_id) {
+      await supabase.from('live_fixture_mappings').upsert({
+        canonical_event_id: upcoming.canonical_event_id,
+        api_football_fixture_id: score.fixture_id,
+        odds_api_io_event_id: upcoming.odds_api_io_event_id ?? null,
+        sport: 'football', updated_at: new Date().toISOString(),
+      }, { onConflict: 'canonical_event_id' });
+      return upcoming.canonical_event_id;
+    }
+  }
+
   const canonicalEventId = fallbackCanonicalEventId(provider, score.fixture_id);
   await supabase.from('live_fixture_mappings').upsert({
     canonical_event_id: canonicalEventId,
