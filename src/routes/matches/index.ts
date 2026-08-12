@@ -5,6 +5,7 @@ import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { getCachedLiveScores } from '../../services/liveScoreService';
 import { buildLiveFeed } from '../../services/liveFeedService';
 import { getPopularMatches } from '../../services/popularMatchService';
+import { getUpcomingFootballFixtures } from '../../services/upcomingFootballOddsService';
 
 const router = Router();
 
@@ -65,6 +66,14 @@ router.get('/live', async (req, res) => {
 
   const { data } = await query;
   return sendSuccess(res, data ?? []);
+});
+
+// GET /matches/upcoming-football - canonical upcoming football fixtures.
+// This deliberately does not use the generic odds rows so provider fallback
+// IDs and competition grouping remain stable for the customer.
+router.get('/upcoming-football', async (_req, res) => {
+  try { return sendSuccess(res, await getUpcomingFootballFixtures()); }
+  catch { return sendError(res, 'Failed to load upcoming football fixtures', 500); }
 });
 
 // GET /matches/live-feed - unified live matches (API-Football scores + Odds API odds merged)

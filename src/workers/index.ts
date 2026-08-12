@@ -13,6 +13,7 @@ import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { refreshPopularMatches } from '../services/popularMatchService';
 import { logger } from '../utils/logger';
 import { MoolreService } from '../services/moolreService';
+import { ingestUpcomingFootballOdds, expireStaleUpcomingFootballOdds } from '../services/upcomingFootballOddsService';
 
 async function fetchLiveScores(): Promise<void> {
   try {
@@ -165,6 +166,16 @@ export function startWorkers() {
     }
   });
 
+  // Upcoming football is deliberately independent from live odds: SportMonks
+  // is primary and The Odds API is used only by its dedicated fallback service.
+  cron.schedule('0 */5 * * *', () => {
+    ingestUpcomingFootballOdds().catch(err => logger.error('Upcoming football odds worker error', { err }));
+  });
+  // A five-hour refresh must not leave old prices bettable for the remaining gap.
+  cron.schedule('0 * * * *', () => {
+    expireStaleUpcomingFootballOdds().catch(err => logger.error('Upcoming football odds expiry error', { err }));
+  });
+
   // Fetch live scores every minute — SportMonks primary, api-football fallback
   setInterval(async () => {
     try {
@@ -201,6 +212,7 @@ export function startWorkers() {
   setImmediate(async () => {
     try {
       await ingestAllOdds();
+      await ingestUpcomingFootballOdds();
       await fetchLiveScores();
       await fetchLiveOdds();
       const sports = await getActiveSports();

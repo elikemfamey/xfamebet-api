@@ -71,7 +71,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
   // Validate odds still active
   for (const sel of selections) {
     const { data: oddsData } = await supabase
-      .from('odds_feed').select('odds_value, status, is_live, provider_updated_at, updated_at')
+      .from('odds_feed').select('odds_value, status, is_live, provider_updated_at, updated_at, source')
       .eq('event_id', sel.event_id).eq('market_type', sel.market_type)
       .eq('selection', sel.selection).single();
 
@@ -85,6 +85,17 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
       const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > 45_000;
       if (!oddsData.is_live || stale) {
         return sendError(res, `Live odds for ${sel.event_name} are temporarily suspended. Please try again.`, 400);
+      }
+    }
+
+    // Upcoming canonical football prices are valid for one hour only. This is
+    // intentionally separate from live freshness and excludes legacy events.
+    if (sel.event_id.startsWith('upcoming:football:')) {
+      const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
+      const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > 60 * 60_000;
+      const verifiedSource = ['sportmonks_upcoming', 'odds_api_upcoming_fallback'].includes(oddsData.source);
+      if (oddsData.is_live || stale || !verifiedSource) {
+        return sendError(res, `Upcoming odds for ${sel.event_name} are temporarily suspended. Please refresh.`, 400);
       }
     }
 
