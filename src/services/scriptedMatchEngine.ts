@@ -84,6 +84,7 @@ const STANDARD_CORRECT_SCORES = [
 // ── In-memory maps ─────────────────────────────────────────────────────────────
 
 const activeMatches = new Map<string, NodeJS.Timeout>();
+const movementPulses = new Map<string, NodeJS.Timeout>();
 const matchStates = new Map<string, MatchState>();
 
 async function notifySubscribers(state: MatchState, alertType: 'goal' | 'halftime' | 'fulltime', message: string) {
@@ -393,6 +394,19 @@ async function processScriptedMinute(state: MatchState, matchId: string) {
   const totalTicks = state.possessionTicks.a + state.possessionTicks.b;
   state.possession.a = Math.round(state.possessionTicks.a / totalTicks * 100);
   state.possession.b = 100 - state.possession.a;
+  // Persist a lightweight possession movement every minute. It is deterministic,
+  // moves the pitch without inventing a scoring/statistical event, and gives the
+  // latest ball location a truthful recorded source.
+  const movementSeed = Array.from(`${state.id}:${state.minute}:possession`).reduce((n, char) => (n * 31 + char.charCodeAt(0)) >>> 0, 7);
+  const movementTeam = homeKeepsBall ? state.teamA : state.teamB;
+  const movementX = homeKeepsBall ? 38 + movementSeed % 47 : 15 + movementSeed % 47;
+  const movementY = 14 + ((movementSeed >>> 8) % 73);
+  const { data: movementEvent } = await supabase.from('match_events').insert({
+    simulation_id: state.id, minute: state.minute, event_type: 'possession', player: '', team: movementTeam,
+    commentary: `${movementTeam} are building possession.`, score_a: state.scoreA, score_b: state.scoreB,
+    metadata: { pitch: { x: movementX, y: movementY, attack_side: homeKeepsBall ? 'home' : 'away' } },
+  }).select().single();
+  try { if (movementEvent) getIO().to(`match:${state.id}`).emit('match:event', movementEvent); } catch {}
   const eventsNow = state.scriptEvents.filter(e => e.minute === state.minute && !e._fired);
   for (const ev of eventsNow) {
     ev._fired = true;
@@ -424,6 +438,9 @@ async function processScriptedMinute(state: MatchState, matchId: string) {
 }
 
 async function handleScriptedFulltime(matchId: string, state: MatchState) {
+  const movementPulse = movementPulses.get(matchId);
+  if (movementPulse) clearInterval(movementPulse);
+  movementPulses.delete(matchId);
   const declaredMap = { home: 'team_a', draw: 'draw', away: 'team_b' } as const;
   const result = state.declaredResult
     ? declaredMap[state.declaredResult]
@@ -462,6 +479,24 @@ async function handleScriptedFulltime(matchId: string, state: MatchState) {
 // ── Tick loop (shared by start + resume) ──────────────────────────────────────
 
 function attachTick(matchId: string): NodeJS.Timeout {
+  // Pitch-only heartbeat: frequent deterministic possession flow between match
+  // minutes. It does not create a bettable/statistical event or alter the score.
+  const movementPulse = setInterval(() => {
+    const state = matchStates.get(matchId);
+    if (!state) { clearInterval(movementPulse); movementPulses.delete(matchId); return; }
+    const seed = Array.from(`${state.id}:${state.minute}:${Math.floor(Date.now() / 8000)}`).reduce((n, char) => (n * 31 + char.charCodeAt(0)) >>> 0, 7);
+    const home = ((seed + state.teamAStrength) % Math.max(2, state.teamAStrength + state.teamBStrength)) < state.teamAStrength;
+    const x = home ? 42 + seed % 46 : 12 + seed % 46;
+    const y = 12 + ((seed >>> 8) % 77);
+    try {
+      getIO().to(`match:${state.id}`).emit('match:event', {
+        simulation_id: state.id, minute: state.minute, event_type: 'possession', team: home ? state.teamA : state.teamB,
+        metadata: { pitch: { x, y, attack_side: home ? 'home' : 'away' }, transient: true },
+      });
+    } catch {}
+  }, 8_000);
+  movementPulses.set(matchId, movementPulse);
+
   const interval = setInterval(async () => {
     const state = matchStates.get(matchId);
     if (!state) { clearInterval(interval); return; }
@@ -575,6 +610,9 @@ export class ScriptedMatchEngine {
     if (iv) {
       clearInterval(iv);
       activeMatches.delete(matchId);
+      const pulse = movementPulses.get(matchId);
+      if (pulse) clearInterval(pulse);
+      movementPulses.delete(matchId);
       // matchStates entry is kept so resume can continue from current minute
     }
   }
@@ -602,6 +640,9 @@ export class ScriptedMatchEngine {
   static stopMatch(matchId: string) {
     const iv = activeMatches.get(matchId);
     if (iv) clearInterval(iv);
+    const pulse = movementPulses.get(matchId);
+    if (pulse) clearInterval(pulse);
+    movementPulses.delete(matchId);
     activeMatches.delete(matchId);
     matchStates.delete(matchId);
   }
