@@ -210,9 +210,11 @@ export function startWorkers() {
 
   // Run one immediate ingestion pass on startup (non-blocking)
   setImmediate(async () => {
+    // Start the small, customer-facing upcoming pipeline first. The older
+    // all-sports ingestion may take much longer and must not delay it.
+    ingestUpcomingFootballOdds().catch(err => logger.error('Initial upcoming football ingestion error', { err }));
     try {
       await ingestAllOdds();
-      await ingestUpcomingFootballOdds();
       await fetchLiveScores();
       await fetchLiveOdds();
       const sports = await getActiveSports();

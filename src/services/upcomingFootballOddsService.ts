@@ -162,10 +162,31 @@ export async function getUpcomingFootballFixtures() {
   const ids = (mappings ?? []).map(row => row.canonical_event_id);
   const { data: rows } = ids.length ? await supabase.from('odds_feed').select('*').in('event_id', ids).eq('is_live', false).in('status', ['active', 'suspended']) : { data: [] as any[] };
   const byEvent = new Map<string, any[]>(); for (const row of rows ?? []) byEvent.set(row.event_id, [...(byEvent.get(row.event_id) ?? []), row]);
-  return (mappings ?? []).map((mapping: Mapping) => {
+  const canonicalFixtures = (mappings ?? []).map((mapping: Mapping) => {
     const odds = byEvent.get(mapping.canonical_event_id) ?? [];
     const fresh = odds.some(row => row.status === 'active' && row.provider_updated_at && Date.now() - new Date(row.provider_updated_at).getTime() <= UPCOMING_ODDS_MAX_AGE_MS);
     return { eventId: mapping.canonical_event_id, home: mapping.home_team, away: mapping.away_team, startsAt: mapping.starts_at, sport: 'football', competitionKey: mapping.competition_key, competitionName: mapping.competition_name, country: mapping.country_name ?? null,
       oddsStatus: fresh ? 'active' : 'suspended', oddsLockReason: fresh ? undefined : odds[0]?.lock_reason ?? 'Markets suspended while verified prices are unavailable.', odds };
+  });
+  if (canonicalFixtures.length) return canonicalFixtures;
+
+  // Deployment recovery: before the first canonical cycle completes (or when
+  // migration 024 has just been applied), expose previously ingested upcoming
+  // football rows rather than making the sportsbook appear empty.
+  const { data: legacyRows, error: legacyError } = await supabase.from('odds_feed').select('*')
+    .eq('sport', 'football').eq('status', 'active').gt('starts_at', now)
+    .order('starts_at', { ascending: true }).limit(3000);
+  if (legacyError) {
+    logger.error('[UpcomingFootball] Legacy recovery query failed', { message: legacyError.message });
+    return [];
+  }
+  const legacyByEvent = new Map<string, any[]>();
+  for (const row of legacyRows ?? []) legacyByEvent.set(row.event_id, [...(legacyByEvent.get(row.event_id) ?? []), row]);
+  return [...legacyByEvent.entries()].map(([eventId, eventOdds]) => {
+    const first = eventOdds[0];
+    const [home = 'Home', away = 'Away'] = String(first.event_name ?? '').split(/\s+vs\.?\s+/i);
+    const competitionName = first.league ?? 'Other Football';
+    return { eventId, home, away, startsAt: first.starts_at, sport: 'football', competitionKey: `recovery:${competitionName}`, competitionName, country: first.country_name ?? null,
+      oddsStatus: 'active', odds: eventOdds };
   });
 }
