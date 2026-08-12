@@ -53,6 +53,16 @@ export const env = {
 
   RATE_LIMIT_WINDOW_MS: parseInt(process.env.RATE_LIMIT_WINDOW_MS || '60000', 10),
   RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS || '100', 10),
+  AUTH_RATE_LIMIT_WINDOW_MS: parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS || '900000', 10),
+  AUTH_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.AUTH_RATE_LIMIT_MAX_REQUESTS || '20', 10),
+  BET_RATE_LIMIT_WINDOW_MS: parseInt(process.env.BET_RATE_LIMIT_WINDOW_MS || '60000', 10),
+  BET_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.BET_RATE_LIMIT_MAX_REQUESTS || '30', 10),
+  TEAM_LOGO_RATE_LIMIT_WINDOW_MS: parseInt(process.env.TEAM_LOGO_RATE_LIMIT_WINDOW_MS || '60000', 10),
+  TEAM_LOGO_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.TEAM_LOGO_RATE_LIMIT_MAX_REQUESTS || '120', 10),
+  // Payment requests are scoped to a signed-in account and stored in Redis so
+  // the allowance remains consistent when the API runs on multiple instances.
+  PAYMENT_RATE_LIMIT_WINDOW_MS: parseInt(process.env.PAYMENT_RATE_LIMIT_WINDOW_MS || '3600000', 10),
+  PAYMENT_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.PAYMENT_RATE_LIMIT_MAX_REQUESTS || '30', 10),
 
   AT_API_KEY: process.env.AT_API_KEY || '',
   AT_USERNAME: process.env.AT_USERNAME || 'sandbox',

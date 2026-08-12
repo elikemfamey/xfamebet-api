@@ -75,6 +75,22 @@ services:
         value: "60000"
       - key: RATE_LIMIT_MAX_REQUESTS
         value: "100"
+      - key: AUTH_RATE_LIMIT_WINDOW_MS
+        value: "900000"
+      - key: AUTH_RATE_LIMIT_MAX_REQUESTS
+        value: "20"
+      - key: BET_RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: BET_RATE_LIMIT_MAX_REQUESTS
+        value: "30"
+      - key: TEAM_LOGO_RATE_LIMIT_WINDOW_MS
+        value: "60000"
+      - key: TEAM_LOGO_RATE_LIMIT_MAX_REQUESTS
+        value: "120"
+      - key: PAYMENT_RATE_LIMIT_WINDOW_MS
+        value: "3600000"
+      - key: PAYMENT_RATE_LIMIT_MAX_REQUESTS
+        value: "30"
       - key: AT_API_KEY
         sync: false
       - key: AT_USERNAME
