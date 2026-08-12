@@ -27,7 +27,24 @@ async function clearEvent(eventId: string) {
 
 export async function ingestApiFootballLiveOdds(scores: LiveScore[]): Promise<void> {
   if (!env.API_FOOTBALL_KEY) throw new Error('API_FOOTBALL_KEY not configured');
-  const response = await axios.get('https://v3.football.api-sports.io/odds/live', { headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000 });
+  let response;
+  try {
+    response = await axios.get('https://v3.football.api-sports.io/odds/live', {
+      headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000,
+    });
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error)) {
+      const upstreamMessage = error.response?.data?.message
+        ?? error.response?.data?.errors
+        ?? error.response?.data
+        ?? error.message;
+      throw new Error(`API-Football live odds request failed (HTTP ${error.response?.status ?? 'network'}): ${JSON.stringify(upstreamMessage)}`);
+    }
+    throw error;
+  }
+  if (!Array.isArray(response.data?.response)) {
+    throw new Error(`API-Football live odds returned an invalid response: ${JSON.stringify(response.data?.errors ?? response.data?.message ?? 'missing response array')}`);
+  }
   const events = new Map<number, any>((response.data?.response ?? []).map((event: any) => [event.fixture?.id, event]));
   const now = new Date().toISOString();
   for (const score of scores) {

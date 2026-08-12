@@ -165,7 +165,11 @@ export function startWorkers() {
   }, 30_000);
 
   // Poll API-Football in-play odds every 30 seconds.
-  setInterval(() => { fetchLiveOdds().catch(err => logger.warn('Live odds worker error', { err })); }, 30_000);
+  setInterval(() => {
+    fetchLiveOdds().catch((err: unknown) => logger.warn('Live odds worker error', {
+      message: err instanceof Error ? err.message : String(err),
+    }));
+  }, 30_000);
 
   // Run one immediate ingestion pass on startup (non-blocking)
   setImmediate(async () => {
