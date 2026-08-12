@@ -17,6 +17,7 @@ export interface LiveScore {
   status_short: string; // '1H', 'HT', '2H', 'ET', 'BT', 'P', 'FT'
   league: string;
   country: string;
+  competition_key?: string;
   provider?: 'api_football' | 'sportmonks';
   starts_at?: string | null;
 }
@@ -129,6 +130,7 @@ export async function fetchAndCacheLiveScores(): Promise<LiveScore[]> {
       status_short: f.fixture.status.short ?? '',
       league: f.league.name,
       country: f.league.country,
+      competition_key: `api-football:${f.league.id ?? 'unknown'}`,
       provider: 'api_football',
       starts_at: f.fixture.date ?? null,
     }));

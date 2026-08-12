@@ -11,6 +11,7 @@ export interface LiveFeedMatch {
   odds: [string | number, string | number, string | number]; oddsLocked: boolean;
   oddsStatus: 'active' | 'suspended'; oddsLockReason?: string; markets: number; sportKey: string;
   kickedOffAt: string | null; countryCode?: string | null;
+  apiFootballFixtureId?: number | null; competitionKey?: string | null; country?: string | null;
 }
 interface OddsRow { event_id: string; event_name: string; market_type: string; selection: string; odds_value: number; sport: string; league: string | null; starts_at: string | null; status: string; provider_updated_at?: string | null; updated_at?: string | null; is_live?: boolean; }
 const IN_PLAY = new Set(['1H', 'HT', '2H', 'ET', 'BT', 'P', 'INT']);
@@ -38,7 +39,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     const fresh = areLiveOddsFresh(liveRows);
     const prices = fresh ? h2h(liveRows.filter(row => row.status === 'active')) : { home: undefined, draw: undefined, away: undefined };
     const locked = !fresh || prices.home == null || prices.away == null;
-    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: [locked ? '-' : prices.home!, locked ? '-' : prices.draw ?? '-', locked ? '-' : prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Live markets are temporarily suspended while verified odds are unavailable.' : undefined, markets: locked ? 0 : liveRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null });
+    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: [locked ? '-' : prices.home!, locked ? '-' : prices.draw ?? '-', locked ? '-' : prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Live markets are temporarily suspended while verified odds are unavailable.' : undefined, markets: locked ? 0 : liveRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null, apiFootballFixtureId: score.fixture_id, competitionKey: score.competition_key ?? `api-football:${score.league}`, country: score.country ?? null });
   }
 
   // Other sports require a score-bearing Odds API entry; football is deliberately excluded above.

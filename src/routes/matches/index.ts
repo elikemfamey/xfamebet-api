@@ -72,7 +72,10 @@ router.get('/live', async (req, res) => {
 // This deliberately does not use the generic odds rows so provider fallback
 // IDs and competition grouping remain stable for the customer.
 router.get('/upcoming-football', async (_req, res) => {
-  try { return sendSuccess(res, await getUpcomingFootballFixtures()); }
+  try {
+    const scores = await getCachedLiveScores();
+    return sendSuccess(res, await getUpcomingFootballFixtures(scores.map(score => score.fixture_id)));
+  }
   catch { return sendError(res, 'Failed to load upcoming football fixtures', 500); }
 });
 

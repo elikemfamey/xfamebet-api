@@ -7,7 +7,7 @@ import { broadcastOddsUpdate } from '../socket';
 
 export const UPCOMING_ODDS_MAX_AGE_MS = 60 * 60 * 1000;
 const HEALTH_KEY = 'upcoming_football:provider_health';
-const FIXTURE_WINDOW_DAYS = 3;
+export const UPCOMING_FIXTURE_WINDOW_DAYS = 14;
 
 type Mapping = { canonical_event_id: string; sportmonks_fixture_id?: number | null; api_football_fixture_id?: number | null; odds_api_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_key: string; competition_name: string; country_name?: string | null };
 
@@ -68,11 +68,15 @@ async function ingestApiFootballUpcomingOdds() {
   if (!env.API_FOOTBALL_KEY) throw new Error('API_FOOTBALL_KEY not configured');
   // Fixtures and prices are deliberately separate: fixtures remain visible
   // with suspended markets even when an upcoming match has no listed price.
-  const fixtureResponse = await axios.get('https://v3.football.api-sports.io/fixtures', {
-    params: { next: 100 }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000,
+  const dates = Array.from({ length: UPCOMING_FIXTURE_WINDOW_DAYS }, (_, index) =>
+    new Date(Date.now() + index * 86_400_000).toISOString().slice(0, 10));
+  const fixtureResponses = await Promise.all(dates.map(date => axios.get('https://v3.football.api-sports.io/fixtures', {
+    params: { date }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000,
+  })));
+  const fixtures = fixtureResponses.flatMap(response => {
+    if (!Array.isArray(response.data?.response)) throw new Error('API-Football returned malformed upcoming fixtures');
+    return response.data.response;
   });
-  const fixtures = fixtureResponse.data?.response;
-  if (!Array.isArray(fixtures)) throw new Error('API-Football returned malformed upcoming fixtures');
   for (const event of fixtures) {
     const fixture = event.fixture; const home = event.teams?.home?.name; const away = event.teams?.away?.name;
     if (!fixture?.id || !fixture.date || !home || !away || new Date(fixture.date).getTime() <= Date.now()) continue;
@@ -80,7 +84,6 @@ async function ingestApiFootballUpcomingOdds() {
   }
 
   let pricedEvents = 0;
-  const dates = Array.from({ length: FIXTURE_WINDOW_DAYS }, (_, index) => new Date(Date.now() + index * 86_400_000).toISOString().slice(0, 10));
   for (const date of dates) {
     for (let page = 1; page <= 10; page++) {
       const response = await axios.get('https://v3.football.api-sports.io/odds', { params: { date, page }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000 });
@@ -97,7 +100,7 @@ async function ingestApiFootballUpcomingOdds() {
       if ((response.data?.paging?.current ?? page) >= (response.data?.paging?.total ?? page)) break;
     }
   }
-  if (!pricedEvents) throw new Error('API-Football returned no upcoming odds in the configured fixture window');
+  logger.info('[UpcomingFootball] API-Football catalogue refreshed', { fixtures: fixtures.length, pricedEvents, days: UPCOMING_FIXTURE_WINDOW_DAYS });
 }
 
 export async function expireStaleUpcomingFootballOdds(): Promise<void> {
@@ -125,22 +128,27 @@ export async function ingestUpcomingFootballOdds(): Promise<void> {
   await expireStaleUpcomingFootballOdds();
 }
 
-export async function getUpcomingFootballFixtures() {
+export async function getUpcomingFootballFixtures(liveFixtureIds: number[] = []) {
   const now = new Date().toISOString();
-  const { data: mappings, error } = await supabase.from('upcoming_football_fixture_mappings').select('*').gt('starts_at', now).order('starts_at').limit(1000);
+  const end = new Date(Date.now() + UPCOMING_FIXTURE_WINDOW_DAYS * 86_400_000).toISOString();
+  const [{ data: futureMappings, error }, { data: liveMappings }] = await Promise.all([
+    supabase.from('upcoming_football_fixture_mappings').select('*').gt('starts_at', now).lte('starts_at', end).order('starts_at').limit(5000),
+    liveFixtureIds.length ? supabase.from('upcoming_football_fixture_mappings').select('*').in('api_football_fixture_id', liveFixtureIds) : Promise.resolve({ data: [] as Mapping[] }),
+  ]);
+  const mappings = [...new Map([...(futureMappings ?? []), ...(liveMappings ?? [])].map((mapping: any) => [mapping.canonical_event_id, mapping])).values()];
   // A missing migration must not turn the public sportsbook into a hanging
   // request. The client will immediately use the established generic feed.
   if (error) {
     logger.error('[UpcomingFootball] Fixture mapping query failed', { message: error.message });
     return [];
   }
-  const ids = (mappings ?? []).map(row => row.canonical_event_id);
+  const ids = mappings.map(row => row.canonical_event_id);
   const { data: rows } = ids.length ? await supabase.from('odds_feed').select('*').in('event_id', ids).eq('is_live', false).eq('source', 'api_football_upcoming').in('status', ['active', 'suspended']) : { data: [] as any[] };
   const byEvent = new Map<string, any[]>(); for (const row of rows ?? []) byEvent.set(row.event_id, [...(byEvent.get(row.event_id) ?? []), row]);
-  const canonicalFixtures = (mappings ?? []).map((mapping: Mapping) => {
+  const canonicalFixtures = mappings.map((mapping: Mapping) => {
     const odds = byEvent.get(mapping.canonical_event_id) ?? [];
     const fresh = odds.some(row => row.status === 'active' && row.provider_updated_at && Date.now() - new Date(row.provider_updated_at).getTime() <= UPCOMING_ODDS_MAX_AGE_MS);
-    return { eventId: mapping.canonical_event_id, home: mapping.home_team, away: mapping.away_team, startsAt: mapping.starts_at, sport: 'football', competitionKey: mapping.competition_key, competitionName: mapping.competition_name, country: mapping.country_name ?? null,
+    return { eventId: mapping.canonical_event_id, apiFootballFixtureId: mapping.api_football_fixture_id ?? null, home: mapping.home_team, away: mapping.away_team, startsAt: mapping.starts_at, sport: 'football', competitionKey: mapping.competition_key, competitionName: mapping.competition_name, country: mapping.country_name ?? null,
       oddsStatus: fresh ? 'active' : 'suspended', oddsLockReason: fresh ? undefined : odds[0]?.lock_reason ?? 'Markets suspended while verified prices are unavailable.', odds };
   });
   if (canonicalFixtures.length) return canonicalFixtures;
