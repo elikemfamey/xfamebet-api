@@ -80,7 +80,7 @@ function selectionWon(
 }
 
 export async function settlePendingBets(): Promise<void> {
-  if (!env.SPORTMONKS_API_TOKEN && !env.API_FOOTBALL_KEY) return;
+  if (!env.API_FOOTBALL_KEY) return;
 
   // Only real upcoming football events use this provider-backed settlement.
   const { data: pendingBets, error } = await supabase
@@ -110,18 +110,7 @@ export async function settlePendingBets(): Promise<void> {
     const cacheKey = `settlement:football:${mapping.canonical_event_id}`;
     const cached = await redis.get(cacheKey); if (cached) { completedEvents.set(mapping.canonical_event_id, JSON.parse(cached)); continue; }
     let score: CompletedFootballScore | null = null;
-    if (mapping.sportmonks_fixture_id && env.SPORTMONKS_API_TOKEN) {
-      try {
-        const response = await axios.get(`https://api.sportmonks.com/v3/football/fixtures/${mapping.sportmonks_fixture_id}`, { params: { api_token: env.SPORTMONKS_API_TOKEN, include: 'participants;scores;state' }, timeout: 12_000 });
-        const fixture = response.data?.data; const state = fixture?.state?.developer_name;
-        const participants = fixture?.participants ?? []; const home = participants.find((p: any) => p.meta?.location === 'home'); const away = participants.find((p: any) => p.meta?.location === 'away');
-        if (['FT', 'AET', 'FT_PEN'].includes(state) && home && away) {
-          const scores = fixture.scores ?? [];
-          score = { id: mapping.canonical_event_id, sport_key: 'football', home_team: mapping.home_team, away_team: mapping.away_team, completed: true, scores: [{ name: mapping.home_team, score: String(scores.find((s: any) => s.participant_id === home.id && s.description === 'CURRENT')?.score?.goals ?? 0) }, { name: mapping.away_team, score: String(scores.find((s: any) => s.participant_id === away.id && s.description === 'CURRENT')?.score?.goals ?? 0) }] };
-        }
-      } catch (err: any) { logger.warn('[Settlement] SportMonks final-score fetch failed', { eventId: mapping.canonical_event_id, message: err.message }); }
-    }
-    if (!score && mapping.api_football_fixture_id && env.API_FOOTBALL_KEY) {
+    if (mapping.api_football_fixture_id) {
       try {
         const response = await axios.get('https://v3.football.api-sports.io/fixtures', { params: { id: mapping.api_football_fixture_id }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000 });
         const fixture = response.data?.response?.[0];

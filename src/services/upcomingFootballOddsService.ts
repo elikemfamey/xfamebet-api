@@ -5,41 +5,14 @@ import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { broadcastOddsUpdate } from '../socket';
 
-const SPORTMONKS_BASE = 'https://api.sportmonks.com/v3/football';
 export const UPCOMING_ODDS_MAX_AGE_MS = 60 * 60 * 1000;
 const HEALTH_KEY = 'upcoming_football:provider_health';
 const FIXTURE_WINDOW_DAYS = 3;
-const MAX_FIXTURES_PER_CYCLE = 150;
-const ODDS_REQUEST_CONCURRENCY = 5;
 
-type ProviderFixture = { id: number; starting_at?: string; league?: { id?: number; name?: string; country?: { name?: string } }; participants?: Array<{ name?: string; meta?: { location?: string } }> };
-type ProviderOdd = { label?: string; name?: string; value?: number | string; market_description?: string; market_id?: number; total?: number | string | null; suspended?: boolean; stopped?: boolean; latest_bookmaker_update?: string; updated_at?: string };
 type Mapping = { canonical_event_id: string; sportmonks_fixture_id?: number | null; api_football_fixture_id?: number | null; odds_api_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_key: string; competition_name: string; country_name?: string | null };
 
 function normal(value: string): string { return value.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim(); }
 function fixtureName(home: string, away: string) { return `${home} vs ${away}`; }
-function providerTeams(fixture: ProviderFixture) {
-  const participants = fixture.participants ?? [];
-  return {
-    home: participants.find(item => item.meta?.location === 'home')?.name ?? '',
-    away: participants.find(item => item.meta?.location === 'away')?.name ?? '',
-  };
-}
-function normalizeOdd(odd: ProviderOdd) {
-  const value = Number(odd.value);
-  if (!Number.isFinite(value) || value < 1.01) return null;
-  const description = (odd.market_description ?? '').toLowerCase();
-  const label = (odd.label ?? odd.name ?? '').trim();
-  let market_type = `sportmonks_${odd.market_id ?? 'market'}`;
-  let selection = label.toLowerCase();
-  if (/(fulltime result|match winner|1x2)/.test(description)) {
-    market_type = 'match_winner';
-    selection = label === '1' || /^home$/i.test(label) ? 'home' : label === '2' || /^away$/i.test(label) ? 'away' : 'draw';
-  } else if (/over.?under|total goals/.test(description)) {
-    market_type = 'totals'; selection = `${label}${odd.total != null ? ` ${odd.total}` : ''}`.trim();
-  }
-  return { market_type, selection, odds_value: value, active: !odd.suspended && !odd.stopped, provider_updated_at: odd.latest_bookmaker_update ?? odd.updated_at ?? new Date().toISOString() };
-}
 
 async function clearCaches(eventIds: string[]) {
   await redis.del(REDIS_KEYS.ALL_ODDS);
@@ -66,13 +39,8 @@ async function upsertMapping(input: Omit<Mapping, 'canonical_event_id'> & { cano
   return data as Mapping;
 }
 
-async function writeSnapshot(mapping: Mapping, source: 'sportmonks_upcoming' | 'api_football_upcoming_fallback', odds: Array<NonNullable<ReturnType<typeof normalizeOdd>> | any>) {
+async function writeSnapshot(mapping: Mapping, source: 'api_football_upcoming', odds: any[]) {
   const now = new Date().toISOString();
-  const { data: existing } = await supabase.from('odds_feed').select('source,provider_updated_at,updated_at')
-    .eq('event_id', mapping.canonical_event_id).eq('is_live', false).limit(1);
-  const first = existing?.[0];
-  const freshPrimary = first?.source === 'sportmonks_upcoming' && Date.now() - new Date(first.provider_updated_at ?? first.updated_at).getTime() <= UPCOMING_ODDS_MAX_AGE_MS;
-  if (source === 'api_football_upcoming_fallback' && freshPrimary) return;
   await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: 'Awaiting a refreshed verified upcoming price.', updated_at: now })
     .eq('event_id', mapping.canonical_event_id).eq('is_live', false);
   const rows = odds.map(odd => ({ event_id: mapping.canonical_event_id, event_name: fixtureName(mapping.home_team, mapping.away_team), market_type: odd.market_type, selection: odd.selection, odds_value: odd.odds_value,
@@ -96,8 +64,22 @@ function apiFootballOdds(event: any) {
   }).filter((odd: any) => Number.isFinite(odd.odds_value) && odd.odds_value >= 1.01);
 }
 
-async function ingestApiFootballFallback() {
+async function ingestApiFootballUpcomingOdds() {
   if (!env.API_FOOTBALL_KEY) throw new Error('API_FOOTBALL_KEY not configured');
+  // Fixtures and prices are deliberately separate: fixtures remain visible
+  // with suspended markets even when an upcoming match has no listed price.
+  const fixtureResponse = await axios.get('https://v3.football.api-sports.io/fixtures', {
+    params: { next: 100 }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000,
+  });
+  const fixtures = fixtureResponse.data?.response;
+  if (!Array.isArray(fixtures)) throw new Error('API-Football returned malformed upcoming fixtures');
+  for (const event of fixtures) {
+    const fixture = event.fixture; const home = event.teams?.home?.name; const away = event.teams?.away?.name;
+    if (!fixture?.id || !fixture.date || !home || !away || new Date(fixture.date).getTime() <= Date.now()) continue;
+    await upsertMapping({ api_football_fixture_id: fixture.id, home_team: home, away_team: away, starts_at: fixture.date, competition_key: `api-football:${event.league?.id ?? 'unknown'}`, competition_name: event.league?.name ?? 'Other Football', country_name: event.league?.country ?? null });
+  }
+
+  let pricedEvents = 0;
   const dates = Array.from({ length: FIXTURE_WINDOW_DAYS }, (_, index) => new Date(Date.now() + index * 86_400_000).toISOString().slice(0, 10));
   for (const date of dates) {
     for (let page = 1; page <= 10; page++) {
@@ -109,17 +91,19 @@ async function ingestApiFootballFallback() {
         if (!fixture?.id || !fixture.date || !home || !away) continue;
         const odds = apiFootballOdds(event); if (!odds.length) continue;
         const mapping = await upsertMapping({ api_football_fixture_id: fixture.id, home_team: home, away_team: away, starts_at: fixture.date, competition_key: `api-football:${event.league?.id ?? 'unknown'}`, competition_name: event.league?.name ?? 'Other Football', country_name: event.league?.country ?? null });
-        await writeSnapshot(mapping, 'api_football_upcoming_fallback', odds);
+        await writeSnapshot(mapping, 'api_football_upcoming', odds);
+        pricedEvents += 1;
       }
       if ((response.data?.paging?.current ?? page) >= (response.data?.paging?.total ?? page)) break;
     }
   }
+  if (!pricedEvents) throw new Error('API-Football returned no upcoming odds in the configured fixture window');
 }
 
 export async function expireStaleUpcomingFootballOdds(): Promise<void> {
   const cutoff = new Date(Date.now() - UPCOMING_ODDS_MAX_AGE_MS).toISOString();
   const { data } = await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: 'Markets suspended because the verified price is over one hour old.', updated_at: new Date().toISOString() })
-    .eq('sport', 'football').eq('is_live', false).in('source', ['sportmonks_upcoming', 'api_football_upcoming_fallback']).eq('status', 'active').lt('provider_updated_at', cutoff).select('event_id');
+    .eq('sport', 'football').eq('is_live', false).in('source', ['api_football_upcoming']).eq('status', 'active').lt('provider_updated_at', cutoff).select('event_id');
   const ids = [...new Set((data ?? []).map(row => row.event_id))];
   if (ids.length) await clearCaches(ids);
 }
@@ -127,45 +111,16 @@ export async function expireStaleUpcomingFootballOdds(): Promise<void> {
 export async function ingestUpcomingFootballOdds(): Promise<void> {
   const startedAt = new Date().toISOString();
   try {
-    if (!env.SPORTMONKS_API_TOKEN) throw new Error('SPORTMONKS_API_TOKEN not configured');
-    const start = new Date().toISOString().slice(0, 10);
-    const end = new Date(Date.now() + FIXTURE_WINDOW_DAYS * 24 * 60 * 60_000).toISOString().slice(0, 10);
-    const response = await axios.get(`${SPORTMONKS_BASE}/fixtures/between/${start}/${end}`, { params: { api_token: env.SPORTMONKS_API_TOKEN, include: 'participants;league;league.country' }, timeout: 12_000 });
-    const fixtures = response.data?.data;
-    if (!Array.isArray(fixtures)) throw new Error('SportMonks returned malformed upcoming fixtures');
-    let primaryOddsUnavailable = false;
-    const eligibleFixtures = (fixtures as ProviderFixture[]).filter(fixture => {
-      const { home, away } = providerTeams(fixture);
-      return !!fixture.id && !!home && !!away && !!fixture.starting_at && new Date(fixture.starting_at!).getTime() > Date.now();
-    }).slice(0, MAX_FIXTURES_PER_CYCLE);
-    for (let index = 0; index < eligibleFixtures.length; index += ODDS_REQUEST_CONCURRENCY) {
-      const batch = eligibleFixtures.slice(index, index + ODDS_REQUEST_CONCURRENCY);
-      const results = await Promise.all(batch.map(async fixture => {
-        const { home, away } = providerTeams(fixture);
-      const mapping = await upsertMapping({ sportmonks_fixture_id: fixture.id, home_team: home, away_team: away, starts_at: fixture.starting_at!, competition_key: `sportmonks:${fixture.league?.id ?? fixture.league?.name ?? 'unknown'}`, competition_name: fixture.league?.name ?? 'Other Football', country_name: fixture.league?.country?.name ?? null });
-      try {
-        const oddsResponse = await axios.get(`${SPORTMONKS_BASE}/odds/pre-match/fixtures/${fixture.id}`, { params: { api_token: env.SPORTMONKS_API_TOKEN }, timeout: 12_000 });
-        const odds = (oddsResponse.data?.data ?? []).map(normalizeOdd).filter(Boolean) as Array<NonNullable<ReturnType<typeof normalizeOdd>>>;
-        if (odds.length) await writeSnapshot(mapping, 'sportmonks_upcoming', odds);
-        else return false;
-      } catch (error: any) { logger.warn('[UpcomingFootball] SportMonks fixture odds unavailable', { fixtureId: fixture.id, message: error.message }); return false; }
-      return true;
-      }));
-      if (results.some(result => !result)) primaryOddsUnavailable = true;
-    }
-    // A healthy fixture listing can still have an unavailable odds endpoint.
-    // Reconcile and use fallback prices only for events without a fresh primary.
-    if (primaryOddsUnavailable) await ingestApiFootballFallback();
-    await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'sportmonks', lastSuccessAt: startedAt, lastFailureAt: null, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
+    await ingestApiFootballUpcomingOdds();
+    await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football', lastSuccessAt: startedAt, lastFailureAt: null, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
   } catch (error: any) {
-    logger.warn('[UpcomingFootball] SportMonks failed; using API-Football fallback', { message: error.message });
-    try {
-      await ingestApiFootballFallback();
-      await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football', lastSuccessAt: new Date().toISOString(), lastFailureAt: startedAt, lastFailure: error.message, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
-    } catch (fallbackError: any) {
-      logger.error('[UpcomingFootball] Both odds providers failed', { message: fallbackError.message });
-      await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'unavailable', lastSuccessAt: null, lastFailureAt: new Date().toISOString(), lastFailure: `${error.message}; fallback: ${fallbackError.message}`, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
-    }
+    // Keep the last accepted API-Football snapshot through its one-hour
+    // freshness window; never overwrite it with another provider's data.
+    logger.warn('[UpcomingFootball] API-Football upcoming ingestion failed', { message: error.message });
+    const previous = await redis.get(HEALTH_KEY);
+    let lastSuccessAt: string | null = null;
+    try { lastSuccessAt = previous ? JSON.parse(previous).lastSuccessAt ?? null : null; } catch { /* ignore corrupt health metadata */ }
+    await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football_unavailable', lastSuccessAt, lastFailureAt: startedAt, lastFailure: error.message, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
   }
   await expireStaleUpcomingFootballOdds();
 }
@@ -180,7 +135,7 @@ export async function getUpcomingFootballFixtures() {
     return [];
   }
   const ids = (mappings ?? []).map(row => row.canonical_event_id);
-  const { data: rows } = ids.length ? await supabase.from('odds_feed').select('*').in('event_id', ids).eq('is_live', false).in('status', ['active', 'suspended']) : { data: [] as any[] };
+  const { data: rows } = ids.length ? await supabase.from('odds_feed').select('*').in('event_id', ids).eq('is_live', false).eq('source', 'api_football_upcoming').in('status', ['active', 'suspended']) : { data: [] as any[] };
   const byEvent = new Map<string, any[]>(); for (const row of rows ?? []) byEvent.set(row.event_id, [...(byEvent.get(row.event_id) ?? []), row]);
   const canonicalFixtures = (mappings ?? []).map((mapping: Mapping) => {
     const odds = byEvent.get(mapping.canonical_event_id) ?? [];
@@ -194,7 +149,7 @@ export async function getUpcomingFootballFixtures() {
   // migration 024 has just been applied), expose previously ingested upcoming
   // football rows rather than making the sportsbook appear empty.
   const { data: legacyRows, error: legacyError } = await supabase.from('odds_feed').select('*')
-    .eq('sport', 'football').eq('status', 'active').in('source', ['sportmonks_upcoming', 'api_football_upcoming_fallback']).gt('starts_at', now)
+    .eq('sport', 'football').eq('status', 'active').in('source', ['api_football_upcoming']).gt('starts_at', now)
     .order('starts_at', { ascending: true }).limit(3000);
   if (legacyError) {
     logger.error('[UpcomingFootball] Legacy recovery query failed', { message: legacyError.message });

@@ -1,10 +1,8 @@
 import cron from 'node-cron';
 import { supabase } from '../config/supabase';
 import { redis } from '../config/redis';
-import { fetchAndCacheLiveScores as fetchFromSportMonks, fetchLatestLiveScoreUpdates } from '../services/sportmonksLiveScoreService';
 import { fetchAndCacheLiveScores as fetchFromApiFootball, getCachedLiveScores } from '../services/liveScoreService';
-import { ensureSportMonksFixtureMapping, resolveCanonicalEventId } from '../services/liveFixtureIdentityService';
-import { ingestLiveOddsForEvents } from '../services/sportmonksLiveOddsService';
+import { ingestApiFootballLiveOdds } from '../services/apiFootballLiveOddsService';
 import { SimulationEngine } from '../services/simulationEngine';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { refreshPopularMatches } from '../services/popularMatchService';
@@ -18,24 +16,14 @@ async function fetchLiveScores(): Promise<void> {
     await fetchFromApiFootball();
     await redis.set('live_scores:provider_health', JSON.stringify({ activeSource: 'api_football', lastSuccessAt: new Date().toISOString(), lastFailureAt: null }));
   } catch (apiErr: any) {
-    logger.warn('[LiveScores] API-Football failed, falling back to SportMonks', { message: apiErr.message });
-    await fetchFromSportMonks();
-    await redis.set('live_scores:provider_health', JSON.stringify({ activeSource: 'sportmonks', lastSuccessAt: new Date().toISOString(), lastFailureAt: new Date().toISOString(), lastFailure: apiErr.message }));
+    logger.error('[LiveScores] API-Football failed; retaining only fresh cached scores', { message: apiErr.message });
+    await redis.set('live_scores:provider_health', JSON.stringify({ activeSource: 'api_football_unavailable', lastSuccessAt: null, lastFailureAt: new Date().toISOString(), lastFailure: apiErr.message }));
   }
 }
 
 async function fetchLiveOdds(): Promise<void> {
   const scores = await getCachedLiveScores();
-  const events = await Promise.all(scores.map(async score => {
-    const eventId = await resolveCanonicalEventId(score);
-    // Mapping is an optimisation for SportMonks odds. It must not prevent the
-    // independent Odds API fallback from running during a SportMonks outage.
-    try { await ensureSportMonksFixtureMapping(score, eventId); }
-    catch (err: any) { logger.warn('[LiveOdds] SportMonks fixture mapping failed', { eventId, message: err.message }); }
-    return { eventId, eventName: `${score.home_team} vs ${score.away_team}`, league: score.league || null, startsAt: score.starts_at ?? null,
-      homeScore: score.home_score, awayScore: score.away_score, minute: score.minute, status: score.status_short };
-  }));
-  await ingestLiveOddsForEvents(events);
+  await ingestApiFootballLiveOdds(scores);
 }
 
 export function startWorkers() {
@@ -155,8 +143,7 @@ export function startWorkers() {
 
   // Sportsbook/live data ingestion. Simulations are started only through admin routes.
 
-  // Upcoming football is deliberately independent from live odds: SportMonks
-  // is primary and The Odds API is used only by its dedicated fallback service.
+  // API-Football is the global authority for real-football upcoming fixtures and odds.
   cron.schedule('0 */5 * * *', () => {
     ingestUpcomingFootballOdds().catch(err => logger.error('Upcoming football odds worker error', { err }));
   });
@@ -168,7 +155,7 @@ export function startWorkers() {
     settlePendingBets().catch(err => logger.error('Football settlement worker error', { err }));
   });
 
-  // Fetch live scores every minute — SportMonks primary, api-football fallback
+  // Fetch API-Football live scores every 30 seconds.
   setInterval(async () => {
     try {
       await fetchLiveScores();
@@ -177,9 +164,8 @@ export function startWorkers() {
     }
   }, 30_000);
 
-  // Poll SportMonks /livescores/latest every 15 seconds for incremental updates
-  // (only fixtures that changed in the last 10s — cheap, high-frequency)
-  setInterval(() => { fetchLiveOdds().catch(err => logger.warn('Live odds worker error', { err })); }, 15_000);
+  // Poll API-Football in-play odds every 30 seconds.
+  setInterval(() => { fetchLiveOdds().catch(err => logger.warn('Live odds worker error', { err })); }, 30_000);
 
   // Run one immediate ingestion pass on startup (non-blocking)
   setImmediate(async () => {

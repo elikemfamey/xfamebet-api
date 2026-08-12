@@ -93,7 +93,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
     if (sel.event_id.startsWith('upcoming:football:')) {
       const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
       const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > 60 * 60_000;
-      const verifiedSource = ['sportmonks_upcoming', 'odds_api_upcoming_fallback'].includes(oddsData.source);
+      const verifiedSource = oddsData.source === 'api_football_upcoming';
       if (oddsData.is_live || stale || !verifiedSource) {
         return sendError(res, `Upcoming odds for ${sel.event_name} are temporarily suspended. Please refresh.`, 400);
       }

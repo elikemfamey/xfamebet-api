@@ -58,7 +58,8 @@ export function initSocketIO(server: HttpServer) {
 
     // Subscribe to live match (MatchDetailsModal path — full prefixed id, e.g. 'af:12345')
     socket.on('subscribe_match', ({ matchId }: { matchId: string }) => {
-      const cleanId = matchId.startsWith('af:') ? matchId.slice(3)
+      const cleanId = matchId.startsWith('live:football:api_football:') ? matchId.slice('live:football:api_football:'.length)
+        : matchId.startsWith('af:') ? matchId.slice(3)
         : matchId.startsWith('sim:') ? matchId.slice(4)
         : matchId;
       socket.join(`match:${cleanId}`);
@@ -66,7 +67,8 @@ export function initSocketIO(server: HttpServer) {
     });
 
     socket.on('unsubscribe_match', ({ matchId }: { matchId: string }) => {
-      const cleanId = matchId.startsWith('af:') ? matchId.slice(3)
+      const cleanId = matchId.startsWith('live:football:api_football:') ? matchId.slice('live:football:api_football:'.length)
+        : matchId.startsWith('af:') ? matchId.slice(3)
         : matchId.startsWith('sim:') ? matchId.slice(4)
         : matchId;
       socket.leave(`match:${cleanId}`);
@@ -178,7 +180,7 @@ export function broadcastFixtureUpdate(
   if (!io) return;
 
   const room = `match:${fixtureId}`;
-  const fullId = `af:${fixtureId}`;
+  const fullIds = [`af:${fixtureId}`, `live:football:api_football:${fixtureId}`];
   const status = toMatchStatus(statusShort);
 
   // MatchCard: match:state (room-based, uses numeric id as matchId)
@@ -191,13 +193,16 @@ export function broadcastFixtureUpdate(
   });
 
   // MatchDetailsModal: namespaced events (uses full prefixed id)
-  io.to(room).emit(`match:${fullId}:score`, { home: score.home, away: score.away });
-  io.to(room).emit(`match:${fullId}:timer`, { timer: `${minute}` });
-  io.to(room).emit(`match:${fullId}:status`, { status });
+  for (const fullId of fullIds) {
+    io.to(room).emit(`match:${fullId}:score`, { home: score.home, away: score.away });
+    io.to(room).emit(`match:${fullId}:timer`, { timer: `${minute}` });
+    io.to(room).emit(`match:${fullId}:status`, { status });
+  }
 
   if (stats) {
-    io.to(room).emit(`match:${fullId}:possession`, { home: stats.possession.home, away: stats.possession.away });
-    io.to(room).emit(`match:${fullId}:stats`, {
+    for (const fullId of fullIds) {
+      io.to(room).emit(`match:${fullId}:possession`, { home: stats.possession.home, away: stats.possession.away });
+      io.to(room).emit(`match:${fullId}:stats`, {
       possession: { h: stats.possession.home, a: stats.possession.away },
       shots: { h: stats.shots.home, a: stats.shots.away },
       shotsOnTarget: { h: stats.shotsOnTarget.home, a: stats.shotsOnTarget.away },
@@ -207,14 +212,15 @@ export function broadcastFixtureUpdate(
       yellowCards: { h: stats.yellowCards.home, a: stats.yellowCards.away },
       redCards: { h: stats.redCards.home, a: stats.redCards.away },
       offsides: { h: stats.offsides.home, a: stats.offsides.away },
-    });
+      });
+    }
   }
 
   for (const evt of newEvents) {
     // MatchDetailsModal commentary
-    io.to(room).emit(`match:${fullId}:commentary`, evt);
+    for (const fullId of fullIds) io.to(room).emit(`match:${fullId}:commentary`, evt);
     // MatchDetailsModal recent action
-    io.to(room).emit(`match:${fullId}:recent_action`, {
+    for (const fullId of fullIds) io.to(room).emit(`match:${fullId}:recent_action`, {
       type: evt.type,
       team: evt.team,
       player: evt.player,
