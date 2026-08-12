@@ -54,7 +54,13 @@ async function request<T>(path: string, params: Record<string, string | number |
     await redis.set('odds_api_io:provider_health', JSON.stringify({ activeSource: PROVIDER, lastSuccessAt: new Date().toISOString(), lastFailureAt: null }));
     return response.data;
   } catch (error: any) {
-    logger.warn('[OddsApiIo] Provider request failed', { path, status: error?.response?.status, message: error?.message });
+    const providerDetail = error?.response?.data;
+    logger.warn('[OddsApiIo] Provider request failed', {
+      path,
+      status: error?.response?.status,
+      message: error?.message,
+      providerDetail: typeof providerDetail === 'string' ? providerDetail.slice(0, 500) : providerDetail ?? null,
+    });
     await redis.set('odds_api_io:provider_health', JSON.stringify({ activeSource: 'odds_api_io_unavailable', lastSuccessAt: null, lastFailureAt: new Date().toISOString(), lastFailure: error?.message ?? 'Provider request failed' }));
     return null;
   }
