@@ -29,8 +29,12 @@ async function fetchLiveOdds(): Promise<void> {
   const scores = await getCachedLiveScores();
   const events = await Promise.all(scores.map(async score => {
     const eventId = await resolveCanonicalEventId(score);
-    await ensureSportMonksFixtureMapping(score, eventId);
-    return { eventId, eventName: `${score.home_team} vs ${score.away_team}`, league: score.league || null, startsAt: score.starts_at ?? null };
+    // Mapping is an optimisation for SportMonks odds. It must not prevent the
+    // independent Odds API fallback from running during a SportMonks outage.
+    try { await ensureSportMonksFixtureMapping(score, eventId); }
+    catch (err: any) { logger.warn('[LiveOdds] SportMonks fixture mapping failed', { eventId, message: err.message }); }
+    return { eventId, eventName: `${score.home_team} vs ${score.away_team}`, league: score.league || null, startsAt: score.starts_at ?? null,
+      homeScore: score.home_score, awayScore: score.away_score, minute: score.minute, status: score.status_short };
   }));
   await ingestLiveOddsForEvents(events);
 }

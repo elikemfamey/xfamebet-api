@@ -173,6 +173,10 @@ function correctScoreOdds(
 
 export interface OddsContext {
   matchId: string;
+  /** Optional canonical id for real-provider fallback events. */
+  eventId?: string;
+  source?: string;
+  isLive?: boolean;
   sport: string;
   league: string;
   startsAt: string;
@@ -204,7 +208,7 @@ export async function regulateOdds(ctx: OddsContext): Promise<void> {
     .upsert(rows, { onConflict: 'event_id,market_type,selection' });
 
   // Close markets that are decided or overwhelmingly certain. Admin locks are preserved.
-  const eventId = `sim:${ctx.matchId}`;
+  const eventId = ctx.eventId ?? `sim:${ctx.matchId}`;
   const locks: Array<{ market: string; reason: string }> = [];
   if (ctx.firstScorerTeam) locks.push({ market: 'first_team_to_score', reason: 'First goal has been scored' });
   if (!['first_half', 'halftime_extra'].includes(ctx.phase)) locks.push({ market: 'half_time_result', reason: 'Half-time market is closed' });
@@ -229,7 +233,7 @@ export async function regulateOdds(ctx: OddsContext): Promise<void> {
 
   try {
     broadcastOddsUpdate(
-      `sim:${ctx.matchId}`,
+      eventId,
       persistedRows ?? [],
     );
     redis.del('live_feed:').catch(() => {});
@@ -256,9 +260,11 @@ function buildOddsRows(ctx: OddsContext): object[] {
   const lambdaTotal = lambdaA + lambdaB;
 
   const base = {
-    event_id:   `sim:${matchId}`,
+    event_id:   ctx.eventId ?? `sim:${matchId}`,
     event_name: `${teamAName} vs ${teamBName}`,
-    source:     'simulation',
+    source:     ctx.source ?? 'simulation',
+    is_live:    ctx.isLive ?? false,
+    provider_updated_at: ctx.isLive ? new Date().toISOString() : undefined,
     sport,
     league,
     starts_at:  startsAt,
