@@ -74,6 +74,18 @@ function winProbs(
   return { pA: pA / total, pD: pD / total, pB: pB / total };
 }
 
+/** Public display probabilities use the exact same Poisson model as 1X2 odds. */
+export function calculateWinProbabilities(ctx: Pick<OddsContext, 'scoreA' | 'scoreB' | 'currentMinute' | 'duration' | 'goalProb' | 'teamAStrength' | 'teamBStrength'>) {
+  const strength = Math.max(1, ctx.teamAStrength + ctx.teamBStrength);
+  const minutesLeft = Math.max(0, ctx.duration - ctx.currentMinute);
+  const lambdaA = ctx.goalProb * (ctx.teamAStrength / strength) * minutesLeft;
+  const lambdaB = ctx.goalProb * (ctx.teamBStrength / strength) * minutesLeft;
+  const { pA, pD, pB } = winProbs(ctx.scoreA, ctx.scoreB, lambdaA, lambdaB);
+  const home = Math.round(pA * 100);
+  const draw = Math.round(pD * 100);
+  return { home, draw, away: 100 - home - draw };
+}
+
 /**
  * Over/Under: P(total remaining goals ≥ needed) vs P(< needed).
  * Once the threshold is already crossed the over is near-certain.
@@ -208,14 +220,17 @@ export async function regulateOdds(ctx: OddsContext): Promise<void> {
       .eq('event_id', eventId).eq('market_type', lock.market).eq('locked_by_admin', false).eq('status', 'active');
   }
 
+  // Broadcast the persisted rows (including market state and lock reason), not
+  // only the calculated prices. This keeps every client market in sync.
+  const { data: persistedRows } = await supabase.from('odds_feed')
+    .select('id, event_id, market_type, selection, odds_value, status, lock_reason')
+    .eq('event_id', eventId)
+    .in('status', ['active', 'suspended']);
+
   try {
     broadcastOddsUpdate(
       `sim:${ctx.matchId}`,
-      rows.map(r => ({
-        market_type: (r as any).market_type,
-        selection:   (r as any).selection,
-        odds_value:  (r as any).odds_value,
-      })),
+      persistedRows ?? [],
     );
     redis.del('live_feed:').catch(() => {});
     redis.del(`live_feed:${ctx.sport}`).catch(() => {});

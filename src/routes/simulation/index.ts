@@ -95,7 +95,7 @@ router.get('/:id', async (req, res) => {
 
 // GET /simulation/:id/stats
 router.get('/:id/stats', async (req, res) => {
-  const stats = await SimulationEngine.getMatchStats(req.params.id);
+  const stats = await ScriptedMatchEngine.getMatchSnapshot(req.params.id);
   return sendSuccess(res, stats);
 });
 

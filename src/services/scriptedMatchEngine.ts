@@ -2,7 +2,7 @@ import { supabase } from '../config/supabase';
 import { getIO, broadcastBetWon, broadcastWalletUpdate } from '../socket';
 import { redis, REDIS_KEYS } from '../config/redis';
 import { logger } from '../utils/logger';
-import { regulateOdds, OddsContext } from './liveOddsRegulator';
+import { calculateWinProbabilities, regulateOdds, OddsContext } from './liveOddsRegulator';
 import { WalletService } from './walletService';
 import { NotificationService } from './notificationService';
 
@@ -377,6 +377,10 @@ function broadcastMatchState(state: MatchState, status: string) {
       yellowCards: { h: state.yellowCards.a.length, a: state.yellowCards.b.length }, redCards: { h: state.redCards.a.length, a: state.redCards.b.length },
       passAccuracy: { h: state.passes.a ? Math.round(state.completedPasses.a / state.passes.a * 100) : 0, a: state.passes.b ? Math.round(state.completedPasses.b / state.passes.b * 100) : 0 }, offsides: { h: state.offsides.a, a: state.offsides.b },
     });
+    const winProbability = calculateWinProbabilities(buildOddsContext(state));
+    const recentAdvantage = state.shots.a - state.shots.b + state.corners.a - state.corners.b + (state.scoreA - state.scoreB) * 3;
+    io.to(`match:${state.id}`).emit(`match:sim:${state.id}:momentum`, { value: Math.max(0, Math.min(100, 50 + recentAdvantage * 4)) });
+    io.to(`match:${state.id}`).emit(`match:sim:${state.id}:probabilities`, winProbability);
   } catch {}
 }
 
@@ -532,6 +536,22 @@ function attachTick(matchId: string): NodeJS.Timeout {
 // ── Public engine API ─────────────────────────────────────────────────────────
 
 export class ScriptedMatchEngine {
+
+  static async getMatchSnapshot(matchId: string) {
+    const state = matchStates.get(matchId);
+    const { data: match } = await supabase.from('simulated_matches').select('*').eq('id', matchId).single();
+    const { data: events } = await supabase.from('match_events').select('*').eq('simulation_id', matchId).order('minute', { ascending: false });
+    if (!match) return null;
+    const live = state ?? buildStateFromDb(match as Record<string, unknown>, (match as any).current_minute ?? 0);
+    const stats = {
+      possession: { h: live.possession.a, a: live.possession.b }, shots: { h: live.shots.a, a: live.shots.b }, shotsOnTarget: { h: live.shotsOnTarget.a, a: live.shotsOnTarget.b },
+      corners: { h: live.corners.a, a: live.corners.b }, fouls: { h: live.fouls.a, a: live.fouls.b }, yellowCards: { h: live.yellowCards.a.length, a: live.yellowCards.b.length }, redCards: { h: live.redCards.a.length, a: live.redCards.b.length },
+      passAccuracy: { h: live.passes.a ? Math.round(live.completedPasses.a / live.passes.a * 100) : 0, a: live.passes.b ? Math.round(live.completedPasses.b / live.passes.b * 100) : 0 }, offsides: { h: live.offsides.a, a: live.offsides.b },
+    };
+    const latestEvent = (events ?? []).find((event: any) => event.metadata?.pitch) ?? null;
+    const momentum = Math.max(0, Math.min(100, 50 + (live.shots.a - live.shots.b + live.corners.a - live.corners.b + (live.scoreA - live.scoreB) * 3) * 4));
+    return { score: { home: live.scoreA, away: live.scoreB }, timer: `${live.minute}'`, status: (match as any).status, stats, momentum, probabilities: calculateWinProbabilities(buildOddsContext(live)), events: events ?? [], latestEvent };
+  }
 
   static async startMatch(matchId: string) {
     const { data: match } = await supabase

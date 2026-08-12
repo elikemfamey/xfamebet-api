@@ -192,7 +192,7 @@ router.get('/:eventId/odds', async (req, res) => {
     .from('odds_feed')
     .select('*')
     .eq('event_id', req.params.eventId)
-    .eq('status', 'active');
+    .in('status', ['active', 'suspended']);
 
   if (error) return sendError(res, 'Failed to fetch odds', 500);
 
