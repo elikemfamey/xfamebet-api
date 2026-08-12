@@ -132,12 +132,11 @@ export async function ingestLiveOddsForEvents(events: LiveOddsEvent[]): Promise<
   for (const event of events) {
     try { await ingestSportMonksLiveOdds(event.eventId, event.eventName, event.league, event.startsAt); }
     catch (err: any) {
-      logger.warn('[SportMonksOdds] Live odds fetch failed; trying Odds API fallback', { eventId: event.eventId, message: err.message });
-      try { await ingestOddsApiLiveFallback(event); }
-      catch (fallbackErr: any) {
-        logger.warn('[LiveOdds] External providers unavailable; using regulated internal fallback', { eventId: event.eventId, message: fallbackErr.message });
-        await regulateInternalLiveFallback(event);
-      }
+      // The Odds API feed is pre-match/slow-refresh and must never be reused as
+      // an in-play price. It caused stale prices (for example, 6-0 still priced
+      // near even money). Recalculate from the current verified score instead.
+      logger.warn('[SportMonksOdds] Live odds unavailable; using score-regulated fallback', { eventId: event.eventId, message: err.message });
+      await regulateInternalLiveFallback(event);
     }
   }
 }
