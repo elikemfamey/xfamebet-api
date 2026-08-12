@@ -14,9 +14,9 @@ const UPCOMING_MAX_AGE_MS = 24 * 60 * 60_000;
 const MAX_LIVE_EVENTS = 10;
 const DAILY_LIMIT = 500;
 const HOURLY_LIMIT = 100;
-// Odds-API.io requires a bookmaker filter for the batch odds endpoint. Keep
-// this list small for the free tier and normalize the first available 1X2 line.
-const FALLBACK_BOOKMAKERS = '1xBet,SportyBet';
+// These are display preferences only. The provider's selected-bookmakers
+// endpoint supplies the exact case-sensitive API identifiers at runtime.
+const PREFERRED_BOOKMAKERS = ['1xbet', 'sportybet'];
 
 type ProviderEvent = { id: string; home: string; away: string; startsAt: string; raw: any };
 type Mapping = { canonical_event_id: string; api_football_fixture_id?: number | null; odds_api_io_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_name?: string | null; competition_key?: string | null; country_name?: string | null };
@@ -106,9 +106,27 @@ async function writeSnapshot(mapping: Mapping, providerEventId: string, isLive: 
   return true;
 }
 
+async function selectedBookmakers(): Promise<string[]> {
+  const cacheKey = 'odds_api_io:selected_bookmakers';
+  const cached = await redis.get(cacheKey);
+  if (cached) { try { return JSON.parse(cached); } catch { await redis.del(cacheKey); } }
+  const data: any = await request('/bookmakers/selected');
+  const candidates = Array.isArray(data) ? data : Array.isArray(data?.bookmakers) ? data.bookmakers : Array.isArray(data?.selected) ? data.selected : Array.isArray(data?.data) ? data.data : [];
+  const names = candidates.map((item: any) => typeof item === 'string' ? item : item?.name).filter((name: unknown): name is string => typeof name === 'string' && name.length > 0);
+  const preferred = names.filter((name: string) => PREFERRED_BOOKMAKERS.includes(normal(name).replace(/\s/g, '')));
+  const selected = preferred.length ? preferred : names.slice(0, 2);
+  if (selected.length) await redis.setex(cacheKey, 24 * 60 * 60, JSON.stringify(selected));
+  return selected;
+}
+
 async function fetchMulti(eventIds: string[]): Promise<Map<string, any>> {
   if (!eventIds.length) return new Map();
-  const data: any = await request('/odds/multi', { eventIds: eventIds.join(','), bookmakers: FALLBACK_BOOKMAKERS });
+  const bookmakers = await selectedBookmakers();
+  if (!bookmakers.length) {
+    logger.warn('[OddsApiIo] Batch odds skipped because no selected bookmakers were returned for this API key');
+    return new Map();
+  }
+  const data: any = await request('/odds/multi', { eventIds: eventIds.join(','), bookmakers: bookmakers.join(',') });
   const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.events) ? data.events : [];
   return new Map(rows.map((row: any) => [String(row?.id ?? row?.eventId ?? row?.event_id), row]));
 }
