@@ -150,16 +150,24 @@ export async function refreshOddsApiIoUpcomingFallback(): Promise<void> {
     return;
   }
   const today = new Date().toISOString().slice(0, 10);
+  const lockKey = `odds_api_io:upcoming_refresh:${today}`;
   // This provider is deliberately refreshed once per UTC day, including after
   // restarts and across horizontally scaled API workers.
-  const dailyLock = await redis.set(`odds_api_io:upcoming_refresh:${today}`, '1', 'EX', 2 * 24 * 60 * 60, 'NX');
+  // A previous provider error must not suppress every retry until the next day.
+  const healthRaw = await redis.get('odds_api_io:provider_health');
+  try {
+    if (healthRaw && JSON.parse(healthRaw).activeSource === 'odds_api_io_unavailable') await redis.del(lockKey);
+  } catch { /* a corrupt health value must not block ingestion */ }
+  const dailyLock = await redis.set(lockKey, '1', 'EX', 2 * 24 * 60 * 60, 'NX');
   if (dailyLock !== 'OK') return;
-  const catalogue: any = await request('/events', { sport: 'football', status: 'pending', limit: 500 });
+  // Odds-API.io rejects oversized event requests. A bounded catalogue is also
+  // sufficient because API-Football remains the primary source for all games.
+  const catalogue: any = await request('/events', { sport: 'football', status: 'pending', limit: 100 });
   const providerEvents = (Array.isArray(catalogue) ? catalogue : catalogue?.data ?? catalogue?.events ?? []).map(eventFrom).filter(Boolean) as ProviderEvent[];
   if (!providerEvents.length) {
     // A failed/malformed catalogue fetch must be retried by the next upcoming
     // ingestion cycle; only a successful daily catalogue consumes the lock.
-    await redis.del(`odds_api_io:upcoming_refresh:${today}`);
+    await redis.del(lockKey);
     return;
   }
   const { data: mappings } = await supabase.from('upcoming_football_fixture_mappings').select('*').gt('starts_at', new Date().toISOString()).lte('starts_at', new Date(Date.now() + 30 * 86_400_000).toISOString()).order('starts_at').limit(500);
