@@ -16,7 +16,7 @@ const DAILY_LIMIT = 500;
 const HOURLY_LIMIT = 100;
 // Odds-API.io requires a bookmaker filter for the batch odds endpoint. Keep
 // this list small for the free tier and normalize the first available 1X2 line.
-const FALLBACK_BOOKMAKERS = 'Bet365,SportyBet';
+const FALLBACK_BOOKMAKERS = '1xBet,SportyBet';
 
 type ProviderEvent = { id: string; home: string; away: string; startsAt: string; raw: any };
 type Mapping = { canonical_event_id: string; api_football_fixture_id?: number | null; odds_api_io_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_name?: string | null; competition_key?: string | null; country_name?: string | null };
