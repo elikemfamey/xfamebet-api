@@ -45,13 +45,15 @@ router.get('/live', async (_req, res) => {
 });
 
 // GET /simulation/scheduled — upcoming virtual matches
-router.get('/scheduled', async (_req, res) => {
-  const { data } = await supabase.from('simulated_matches')
+router.get('/scheduled', async (req, res) => {
+  let query = supabase.from('simulated_matches')
     .select('*')
     .eq('status', 'scheduled')
     .ilike('sport', 'virtual_%')
-    .order('scheduled_at', { ascending: true })
-    .limit(20);
+    .order('scheduled_at', { ascending: true }).limit(20);
+  if (req.query.country_code) query = query.eq('country_code', String(req.query.country_code).toUpperCase());
+  if (req.query.league) query = query.ilike('competition', String(req.query.league));
+  const { data } = await query;
   return sendSuccess(res, (data ?? []).map(redact));
 });
 
@@ -59,7 +61,7 @@ router.get('/scheduled', async (_req, res) => {
 router.get('/featured', async (_req, res) => {
   const { data: matches } = await supabase
     .from('simulated_matches')
-    .select('id, team_a, team_b, sport, league_name, competition, scheduled_at, started_at, status, team_a_score, team_b_score, current_minute, home_logo, away_logo')
+    .select('id, team_a, team_b, sport, league_name, competition, country_code, scheduled_at, started_at, status, team_a_score, team_b_score, current_minute, home_logo, away_logo')
     .in('status', ['live', 'scheduled'])
     .not('sport', 'ilike', 'virtual_%')
     .limit(9);
@@ -145,6 +147,7 @@ const createSchema = z.object({
   sport:            z.string().default('football'),
   competition:      z.string().default('PrimeWin League'),
   venue:            z.string().optional(),
+  country_code:     z.string().length(2).transform(v => v.toUpperCase()),
   duration_minutes: z.number().min(1).max(90).default(90),
 
   // Simulation parameters (used only for non-scripted matches)
@@ -185,6 +188,7 @@ const editSchema = z.object({
   away_logo:            z.string().url().optional(),
   competition:          z.string().optional(),
   venue:                z.string().optional(),
+  country_code:         z.string().length(2).transform(v => v.toUpperCase()).optional(),
   scheduled_at:         z.string().datetime().optional(),
   initial_home_odds:    z.number().min(1.01).optional(),
   initial_draw_odds:    z.number().min(1.01).optional(),
@@ -202,8 +206,11 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
   const body = req.body;
   const user = (req as any).user;
 
+  const { data: country } = await supabase.from('countries').select('code').eq('code', body.country_code).single();
+  if (!country) return sendError(res, 'Select a valid country', 400);
+
   const scheduledAt = body.scheduled_at === 'now'
-    ? new Date(Date.now() + 5000).toISOString()
+    ? new Date().toISOString()
     : body.scheduled_at;
 
   const baseInsert: Record<string, unknown> = {
@@ -217,6 +224,7 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
     goal_probability: body.goal_probability,
     card_probability: body.card_probability,
     scheduled_at:     scheduledAt,
+    country_code:     body.country_code,
     status:           'scheduled',
   };
 
@@ -236,7 +244,8 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
     is_admin_created:  true,
     created_by:        user?.id,
     // scripted fields
-    is_scripted:     body.is_scripted,
+    // Admin matches are deterministic. An empty event plan deliberately ends 0-0.
+    is_scripted:     true,
     script_events:   body.script_events,
     script_stats:    body.script_stats ?? {},
     declared_result: body.declared_result ?? null,
@@ -251,7 +260,7 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
   if (error) return sendError(res, error.message, 500);
 
   // Generate initial odds
-  if ((data as any).is_scripted) {
+  if (true) {
     await ScriptedMatchEngine.generateOdds(data.id, {
       homeOdds: body.initial_home_odds,
       drawOdds: body.initial_draw_odds,
@@ -267,7 +276,41 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
     });
   }
 
+  // "Now" must not wait for the scheduler. Claim the scheduled row before starting.
+  if (body.scheduled_at === 'now') {
+    const { data: claimed } = await supabase.from('simulated_matches')
+      .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null })
+      .eq('id', data.id).eq('status', 'scheduled').select('id').single();
+    if (claimed) {
+      await ScriptedMatchEngine.startMatch(data.id);
+      try { getIO().emit('simulation:live', { matchId: data.id, status: 'live', sport: data.sport }); } catch {}
+      await bustLiveFeedCache(data.sport);
+      return sendSuccess(res, { ...data, status: 'live', started_at: new Date().toISOString() }, 201);
+    }
+  }
+
   return sendSuccess(res, data, 201);
+});
+
+// Match alert preferences for the live-match modal.
+router.get('/:id/alerts', authenticate, async (req, res) => {
+  const { data } = await supabase.from('match_alert_subscriptions').select('alert_type')
+    .eq('simulation_id', req.params.id).eq('user_id', req.user!.id);
+  return sendSuccess(res, (data ?? []).map(row => row.alert_type));
+});
+
+router.put('/:id/alerts', authenticate, validateBody(z.object({
+  alert_types: z.array(z.enum(['goal', 'halftime', 'fulltime'])).max(3),
+})), async (req, res) => {
+  const { alert_types } = req.body;
+  const { data: match } = await supabase.from('simulated_matches').select('id, status').eq('id', req.params.id).single();
+  if (!match) return sendError(res, 'Match not found', 404);
+  if (!['scheduled', 'live'].includes(match.status)) return sendError(res, 'Alerts are unavailable for this match', 400);
+  await supabase.from('match_alert_subscriptions').delete().eq('simulation_id', req.params.id).eq('user_id', req.user!.id);
+  if (alert_types.length) await supabase.from('match_alert_subscriptions').insert(
+    alert_types.map((alert_type: 'goal' | 'halftime' | 'fulltime') => ({ simulation_id: req.params.id, user_id: req.user!.id, alert_type })),
+  );
+  return sendSuccess(res, alert_types);
 });
 
 // ── Admin: edit match before it starts ───────────────────────────────────────
@@ -287,6 +330,7 @@ router.patch('/admin/:id/edit', authenticate, requireAdmin, validateBody(editSch
   if (b.away_logo !== undefined)         updates.away_logo = b.away_logo;
   if (b.competition !== undefined)       { updates.competition = b.competition; updates.league_name = b.competition; }
   if (b.venue !== undefined)             updates.venue = b.venue;
+  if (b.country_code !== undefined)      updates.country_code = b.country_code;
   if (b.scheduled_at !== undefined)      updates.scheduled_at = b.scheduled_at;
   if (b.initial_home_odds !== undefined) updates.initial_home_odds = b.initial_home_odds;
   if (b.initial_draw_odds !== undefined) updates.initial_draw_odds = b.initial_draw_odds;
@@ -398,6 +442,7 @@ router.post('/admin/:id/resume', authenticate, requireAdmin, async (req, res) =>
 
 router.post('/admin/:id/stop', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
+  await supabase.from('match_alert_subscriptions').delete().eq('simulation_id', id);
   const { data: match } = await supabase.from('simulated_matches').select('is_scripted').eq('id', id).single();
 
   if ((match as any)?.is_scripted) ScriptedMatchEngine.stopMatch(id);
@@ -548,23 +593,24 @@ router.get('/admin/:id/markets', authenticate, requireAdmin, async (req, res) =>
   const { id } = req.params;
   const { data } = await supabase
     .from('odds_feed')
-    .select('market_type, status')
+    .select('market_type, status, lock_reason, locked_by_admin')
     .eq('event_id', `sim:${id}`)
     .eq('source', 'simulation');
 
   if (!data) return sendSuccess(res, []);
 
   // Collapse to one entry per market_type — locked if ANY selection is suspended
-  const byMarket: Record<string, string> = {};
+  const byMarket: Record<string, { status: string; reason?: string | null }> = {};
   for (const row of data) {
     if (!byMarket[row.market_type] || row.status === 'suspended') {
-      byMarket[row.market_type] = row.status;
+      byMarket[row.market_type] = { status: row.status, reason: (row as any).lock_reason };
     }
   }
 
-  const markets = Object.entries(byMarket).map(([market_type, status]) => ({
+  const markets = Object.entries(byMarket).map(([market_type, item]) => ({
     market_type,
-    locked: status === 'suspended',
+    locked: item.status === 'suspended',
+    reason: item.reason ?? null,
   }));
 
   return sendSuccess(res, markets);
@@ -582,7 +628,7 @@ router.patch('/admin/:id/market-lock', authenticate, requireAdmin, validateBody(
   const newStatus = locked ? 'suspended' : 'active';
 
   await supabase.from('odds_feed')
-    .update({ status: newStatus, updated_at: new Date().toISOString() })
+    .update({ status: newStatus, locked_by_admin: locked, lock_reason: locked ? 'Locked by an administrator' : null, updated_at: new Date().toISOString() })
     .eq('event_id', eventId)
     .eq('market_type', market_type)
     .eq('source', 'simulation');
@@ -655,6 +701,7 @@ router.post('/admin/:id/inject-event', authenticate, requireAdmin, validateBody(
 router.delete('/admin/:id', authenticate, requireAdmin, async (req, res) => {
   const { id } = req.params;
   const eventId = `sim:${id}`;
+  await supabase.from('match_alert_subscriptions').delete().eq('simulation_id', id);
 
   const { data: match } = await supabase
     .from('simulated_matches')

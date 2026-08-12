@@ -24,6 +24,7 @@ export interface LiveFeedMatch {
   markets: number;
   sportKey: string;
   kickedOffAt: string | null;
+  countryCode?: string | null;
 }
 
 // API-Football in-play status codes
@@ -171,7 +172,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       .limit(1000),
     supabase
       .from('simulated_matches')
-      .select('id, team_a, team_b, team_a_score, team_b_score, current_minute, sport, competition, league_name, home_logo, away_logo, started_at')
+      .select('id, team_a, team_b, team_a_score, team_b_score, current_minute, sport, competition, league_name, country_code, home_logo, away_logo, started_at')
       .eq('status', 'live'),
   ]);
 
@@ -343,6 +344,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
       markets,
       sportKey: match.sport ?? 'football',
       kickedOffAt: match.started_at ?? null,
+      countryCode: (match as any).country_code ?? null,
     });
   }
 
@@ -352,6 +354,9 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
   // These are games where Odds API hasn't provided scores yet but the game has started.
   for (const [eventId, rows] of byEvent) {
     if (processedEventIds.has(eventId)) continue;
+    // Simulations enter this feed only from the authoritative live-match query above.
+    // Scheduled simulations may have active pre-match odds but must never be inferred as live.
+    if (eventId.startsWith('sim:')) continue;
 
     const first = rows[0];
     if (!first.starts_at) continue;

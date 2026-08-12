@@ -103,30 +103,28 @@ export function startWorkers() {
     }
   });
 
-  // Auto-start all scheduled matches at their scheduled time (checks every minute)
-  cron.schedule('* * * * *', async () => {
+  // Claim due matches every five seconds. The status predicate makes this safe across workers.
+  setInterval(async () => {
     try {
       const { data: due } = await supabase
         .from('simulated_matches')
-        .select('id, is_scripted')
+        .select('id, is_scripted, sport')
         .eq('status', 'scheduled')
         .lte('scheduled_at', new Date().toISOString());
 
       for (const match of due ?? []) {
+        const { data: claimed } = await supabase.from('simulated_matches')
+          .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null })
+          .eq('id', match.id).eq('status', 'scheduled').select('id').single();
+        if (!claimed) continue;
         const isScripted = (match as any).is_scripted;
         if (isScripted) {
           if (!ScriptedMatchEngine.isActive(match.id)) {
-            await supabase.from('simulated_matches')
-              .update({ status: 'live', started_at: new Date().toISOString() })
-              .eq('id', match.id);
             await ScriptedMatchEngine.startMatch(match.id);
             logger.info(`Auto-started scripted match ${match.id}`);
           }
         } else {
           if (!SimulationEngine.isActive(match.id)) {
-            await supabase.from('simulated_matches')
-              .update({ status: 'live', started_at: new Date().toISOString() })
-              .eq('id', match.id);
             await SimulationEngine.startMatch(match.id);
             logger.info(`Auto-started simulation match ${match.id}`);
           }
@@ -135,7 +133,7 @@ export function startWorkers() {
     } catch (err) {
       logger.error('Match auto-start error', { err });
     }
-  });
+  }, 5_000);
 
   // Sportsbook/live data ingestion. Simulations are started only through admin routes.
 

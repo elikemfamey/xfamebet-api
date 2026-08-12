@@ -4,6 +4,7 @@ import { redis, REDIS_KEYS } from '../config/redis';
 import { logger } from '../utils/logger';
 import { regulateOdds, OddsContext } from './liveOddsRegulator';
 import { WalletService } from './walletService';
+import { NotificationService } from './notificationService';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,15 @@ const STANDARD_CORRECT_SCORES = [
 const activeMatches = new Map<string, NodeJS.Timeout>();
 const matchStates = new Map<string, MatchState>();
 
+async function notifySubscribers(state: MatchState, alertType: 'goal' | 'halftime' | 'fulltime', message: string) {
+  const { data } = await supabase.from('match_alert_subscriptions').select('user_id')
+    .eq('simulation_id', state.id).eq('alert_type', alertType);
+  await Promise.all((data ?? []).map(({ user_id }) => NotificationService.send(
+    user_id, 'match_alert', `${state.teamA} vs ${state.teamB}`, message,
+    { simulation_id: state.id, alert_type: alertType },
+  )));
+}
+
 // ── Commentary builder ─────────────────────────────────────────────────────────
 
 function buildCommentary(ev: ScriptEvent, teamName: string, score: string): string {
@@ -145,6 +155,7 @@ async function saveEvent(
     io.to(`match:${state.id}`).emit('match:event', event);
     io.emit('simulation:event', { matchId: state.id, event });
   } catch {}
+  if (eventType === 'goal') await notifySubscribers(state, 'goal', commentary);
 }
 
 
@@ -339,12 +350,19 @@ function broadcastMatchState(state: MatchState, status: string) {
       fouls: state.fouls,
       corners: state.corners,
     });
+    io.to(`match:${state.id}`).emit(`match:sim:${state.id}:score`, { home: state.scoreA, away: state.scoreB });
     io.to(`match:${state.id}`).emit(`match:${state.id}:timer`, { timer: status });
     const matchStatus = status === 'HT' ? 'halftime'
       : /^\d+\+\d+$/.test(status) ? 'injury_time'
       : state.phase === 'second_half' ? 'second_half'
       : 'live';
     io.to(`match:${state.id}`).emit(`match:${state.id}:status`, { status: matchStatus });
+    io.to(`match:${state.id}`).emit(`match:sim:${state.id}:stats`, {
+      possession: { h: state.possession.a, a: state.possession.b }, shots: { h: state.shots.a, a: state.shots.b },
+      shotsOnTarget: { h: 0, a: 0 }, corners: { h: state.corners.a, a: state.corners.b }, fouls: { h: state.fouls.a, a: state.fouls.b },
+      yellowCards: { h: state.yellowCards.a.length, a: state.yellowCards.b.length }, redCards: { h: state.redCards.a.length, a: state.redCards.b.length },
+      passAccuracy: { h: 75, a: 75 }, offsides: { h: 0, a: 0 },
+    });
   } catch {}
 }
 
@@ -419,6 +437,8 @@ async function handleScriptedFulltime(matchId: string, state: MatchState) {
   } catch {}
 
   await settleBets(matchId, result, state.scoreA, state.scoreB);
+  await notifySubscribers(state, 'fulltime', `Full time: ${state.teamA} ${state.scoreA}–${state.scoreB} ${state.teamB}.`);
+  await supabase.from('match_alert_subscriptions').delete().eq('simulation_id', matchId);
   matchStates.delete(matchId);
   logger.info(`Scripted match ${matchId} ended: ${state.scoreA}-${state.scoreB} (${result})`);
 }
@@ -454,6 +474,7 @@ function attachTick(matchId: string): NodeJS.Timeout {
         state.halftimeScoreA = state.scoreA;
         state.halftimeScoreB = state.scoreB;
         await saveEvent(state, 45, 'halftime', '', '', 'Half-time! Teams head to the dressing room.');
+        await notifySubscribers(state, 'halftime', `Half time: ${state.teamA} ${state.scoreA}–${state.scoreB} ${state.teamB}.`);
       }
       return;
     }
@@ -699,7 +720,7 @@ export class ScriptedMatchEngine {
   ) {
     const { data: match } = await supabase
       .from('simulated_matches')
-      .select('team_a, team_b, competition, league_name, scheduled_at, sport, initial_home_odds, initial_draw_odds, initial_away_odds, markets')
+      .select('team_a, team_b, competition, league_name, scheduled_at, sport, country_code, initial_home_odds, initial_draw_odds, initial_away_odds, markets')
       .eq('id', matchId)
       .single();
     if (!match) return;
@@ -718,6 +739,7 @@ export class ScriptedMatchEngine {
       source:     'simulation',
       sport,
       league,
+      country_code: (match as any).country_code ?? null,
       starts_at:  startsAt,
       status:     'active',
       updated_at: new Date().toISOString(),

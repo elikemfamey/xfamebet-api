@@ -639,7 +639,7 @@ export class SimulationEngine {
 
     const { data: match } = await supabase
       .from('simulated_matches')
-      .select('team_a, team_b, league_name, scheduled_at, sport')
+      .select('team_a, team_b, league_name, scheduled_at, sport, country_code')
       .eq('id', matchId)
       .single();
     if (!match) return;
@@ -653,6 +653,7 @@ export class SimulationEngine {
       source: 'simulation',
       sport,
       league,
+      country_code: (match as any).country_code ?? null,
       starts_at: startsAt,
       status: 'active',
     };

@@ -11,6 +11,8 @@ const router = Router();
 // GET /matches - list all available matches with odds
 router.get('/', async (req, res) => {
   const sport = req.query.sport as string;
+  const countryCode = req.query.country_code as string;
+  const league = req.query.league as string;
   const live = req.query.live === 'true';
   const page = parseInt(req.query.page as string) || 1;
   // High limit so all 35+ market rows per match fit without truncation
@@ -34,6 +36,8 @@ router.get('/', async (req, res) => {
     .range(offset, offset + limit - 1);
 
   if (sport) query = query.eq('sport', sport);
+  if (countryCode) query = query.eq('country_code', countryCode.toUpperCase());
+  if (league) query = query.ilike('league', league);
   if (live) query = query.not('starts_at', 'is', null).lte('starts_at', new Date().toISOString());
 
   const { data, count } = await query;

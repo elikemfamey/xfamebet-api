@@ -14,7 +14,7 @@ export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 export type OddsStatus = 'active' | 'suspended' | 'settled' | 'void';
 export type DepositStatus = 'pending' | 'approved' | 'rejected' | 'processing' | 'completed';
 export type WithdrawalStatus = 'pending' | 'approved' | 'rejected' | 'processing' | 'completed';
-export type NotificationType = 'bet_won' | 'bet_lost' | 'deposit_approved' | 'withdrawal_approved' | 'withdrawal_rejected' | 'kyc_approved' | 'kyc_rejected' | 'fraud_alert' | 'promotion' | 'system';
+export type NotificationType = 'bet_won' | 'bet_lost' | 'deposit_approved' | 'withdrawal_approved' | 'withdrawal_rejected' | 'kyc_approved' | 'kyc_rejected' | 'fraud_alert' | 'promotion' | 'match_alert' | 'system';
 
 export interface User {
   id: string;

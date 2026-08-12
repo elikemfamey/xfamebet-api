@@ -191,6 +191,23 @@ export async function regulateOdds(ctx: OddsContext): Promise<void> {
     .from('odds_feed')
     .upsert(rows, { onConflict: 'event_id,market_type,selection' });
 
+  // Close markets that are decided or overwhelmingly certain. Admin locks are preserved.
+  const eventId = `sim:${ctx.matchId}`;
+  const locks: Array<{ market: string; reason: string }> = [];
+  if (ctx.firstScorerTeam) locks.push({ market: 'first_team_to_score', reason: 'First goal has been scored' });
+  if (!['first_half', 'halftime_extra'].includes(ctx.phase)) locks.push({ market: 'half_time_result', reason: 'Half-time market is closed' });
+  const byMarket = new Map<string, any[]>();
+  for (const row of rows as any[]) byMarket.set(row.market_type, [...(byMarket.get(row.market_type) ?? []), row]);
+  for (const [market, entries] of byMarket) {
+    const leading = Math.min(...entries.map(entry => entry.odds_value));
+    const impliedProbability = 1 / (leading * MARGIN);
+    if (impliedProbability >= 0.95) locks.push({ market, reason: 'Outcome probability is at least 95%' });
+  }
+  for (const lock of locks) {
+    await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: lock.reason })
+      .eq('event_id', eventId).eq('market_type', lock.market).eq('locked_by_admin', false).eq('status', 'active');
+  }
+
   try {
     broadcastOddsUpdate(
       `sim:${ctx.matchId}`,
