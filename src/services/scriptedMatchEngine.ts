@@ -9,7 +9,7 @@ import { NotificationService } from './notificationService';
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export type ScriptEventType =
-  | 'goal' | 'yellow_card' | 'red_card' | 'foul' | 'corner'
+  | 'goal' | 'shot' | 'shot_on_target' | 'pass_complete' | 'pass_incomplete' | 'yellow_card' | 'red_card' | 'foul' | 'corner'
   | 'substitution' | 'penalty_missed' | 'var_check' | 'offside';
 
 export interface ScriptEvent {
@@ -51,6 +51,11 @@ interface MatchState {
   shots: { a: number; b: number };
   fouls: { a: number; b: number };
   corners: { a: number; b: number };
+  shotsOnTarget: { a: number; b: number };
+  passes: { a: number; b: number };
+  completedPasses: { a: number; b: number };
+  offsides: { a: number; b: number };
+  possessionTicks: { a: number; b: number };
   yellowCards: { a: string[]; b: string[] };
   redCards: { a: string[]; b: string[] };
   goalProb: number;
@@ -106,6 +111,10 @@ function buildCommentary(ev: ScriptEvent, teamName: string, score: string): stri
       return `RED CARD! ${p} is sent off! ${teamName} are down to 10 men!`;
     case 'foul':
       return `Foul by ${p}. Free kick awarded.`;
+    case 'shot': return `${p} takes a shot for ${teamName}.`;
+    case 'shot_on_target': return `${p}'s effort is on target for ${teamName}.`;
+    case 'pass_complete': return `${teamName} complete a pass.`;
+    case 'pass_incomplete': return `${teamName} lose possession with an incomplete pass.`;
     case 'corner':
       return `Corner kick for ${teamName}.`;
     case 'substitution':
@@ -138,6 +147,10 @@ async function saveEvent(
   commentary: string,
   extra?: Record<string, unknown>,
 ) {
+  const seed = Array.from(`${state.id}:${minute}:${eventType}:${team}`).reduce((n, char) => (n * 31 + char.charCodeAt(0)) >>> 0, 7);
+  const home = team === state.teamA;
+  const x = eventType === 'corner' ? (home ? 94 : 6) : eventType === 'goal' || eventType === 'shot' || eventType === 'shot_on_target' ? (home ? 82 + seed % 13 : 5 + seed % 13) : 30 + seed % 41;
+  const y = 12 + ((seed >>> 8) % 77);
   const { data: event } = await supabase.from('match_events').insert({
     simulation_id: state.id,
     minute,
@@ -147,7 +160,7 @@ async function saveEvent(
     commentary,
     score_a: state.scoreA,
     score_b: state.scoreB,
-    metadata: extra ?? {},
+    metadata: { ...(extra ?? {}), pitch: { x, y, attack_side: home ? 'home' : 'away' } },
   }).select().single();
 
   try {
@@ -293,6 +306,7 @@ function buildStateFromDb(match: Record<string, unknown>, fromMinute: number): M
     teamBStrength: (match.team_b_strength as number)  ?? 6,
     possession: { a: ss.final_possession_home ?? 50, b: 100 - (ss.final_possession_home ?? 50) },
     shots:    { a: 0, b: 0 },
+    shotsOnTarget: { a: 0, b: 0 }, passes: { a: 0, b: 0 }, completedPasses: { a: 0, b: 0 }, offsides: { a: 0, b: 0 }, possessionTicks: { a: 0, b: 0 },
     fouls:    { a: 0, b: 0 },
     corners:  { a: 0, b: 0 },
     yellowCards: { a: [], b: [] },
@@ -359,28 +373,22 @@ function broadcastMatchState(state: MatchState, status: string) {
     io.to(`match:${state.id}`).emit(`match:${state.id}:status`, { status: matchStatus });
     io.to(`match:${state.id}`).emit(`match:sim:${state.id}:stats`, {
       possession: { h: state.possession.a, a: state.possession.b }, shots: { h: state.shots.a, a: state.shots.b },
-      shotsOnTarget: { h: 0, a: 0 }, corners: { h: state.corners.a, a: state.corners.b }, fouls: { h: state.fouls.a, a: state.fouls.b },
+      shotsOnTarget: { h: state.shotsOnTarget.a, a: state.shotsOnTarget.b }, corners: { h: state.corners.a, a: state.corners.b }, fouls: { h: state.fouls.a, a: state.fouls.b },
       yellowCards: { h: state.yellowCards.a.length, a: state.yellowCards.b.length }, redCards: { h: state.redCards.a.length, a: state.redCards.b.length },
-      passAccuracy: { h: 75, a: 75 }, offsides: { h: 0, a: 0 },
+      passAccuracy: { h: state.passes.a ? Math.round(state.completedPasses.a / state.passes.a * 100) : 0, a: state.passes.b ? Math.round(state.completedPasses.b / state.passes.b * 100) : 0 }, offsides: { h: state.offsides.a, a: state.offsides.b },
     });
   } catch {}
 }
 
 
-async function interpolateStats(state: MatchState) {
-  const { scriptStats: ss, minute: m, duration: d } = state;
-  if (ss.final_shots_home)   state.shots.a   = interpStat(state.shots.a,   ss.final_shots_home,   m, d);
-  if (ss.final_shots_away)   state.shots.b   = interpStat(state.shots.b,   ss.final_shots_away,   m, d);
-  if (ss.final_fouls_home)   state.fouls.a   = interpStat(state.fouls.a,   ss.final_fouls_home,   m, d);
-  if (ss.final_fouls_away)   state.fouls.b   = interpStat(state.fouls.b,   ss.final_fouls_away,   m, d);
-  if (ss.final_corners_home) state.corners.a = interpStat(state.corners.a, ss.final_corners_home, m, d);
-  if (ss.final_corners_away) state.corners.b = interpStat(state.corners.b, ss.final_corners_away, m, d);
-  const targetPoss = ss.final_possession_home ?? 50;
-  state.possession.a = Math.min(80, Math.max(20, targetPoss + (Math.random() * 6 - 3)));
-  state.possession.b = 100 - state.possession.a;
-}
-
 async function processScriptedMinute(state: MatchState, matchId: string) {
+  // Possession is accumulated every minute and always totals 100%; no random display drift.
+  const homeKeepsBall = ((state.minute * 17 + state.teamAStrength * 11) % Math.max(2, Math.round(state.teamAStrength + state.teamBStrength))) < state.teamAStrength;
+  const possessionSide = homeKeepsBall ? 'a' : 'b';
+  state.possessionTicks[possessionSide]++;
+  const totalTicks = state.possessionTicks.a + state.possessionTicks.b;
+  state.possession.a = Math.round(state.possessionTicks.a / totalTicks * 100);
+  state.possession.b = 100 - state.possession.a;
   const eventsNow = state.scriptEvents.filter(e => e.minute === state.minute && !e._fired);
   for (const ev of eventsNow) {
     ev._fired = true;
@@ -389,11 +397,16 @@ async function processScriptedMinute(state: MatchState, matchId: string) {
     const player   = ev.player ?? '';
     if (ev.type === 'goal') {
       if (ev.team === 'home') state.scoreA++; else state.scoreB++;
-      state.shots[sideKey]++;
+      state.shots[sideKey]++; state.shotsOnTarget[sideKey]++;
       if (state.firstScorerTeam === null) state.firstScorerTeam = teamName;
       await supabase.from('simulated_matches')
         .update({ team_a_score: state.scoreA, team_b_score: state.scoreB }).eq('id', matchId);
       await regulateOdds(buildOddsContext(state));
+    } else if (ev.type === 'shot') { state.shots[sideKey]++;
+    } else if (ev.type === 'shot_on_target') { state.shots[sideKey]++; state.shotsOnTarget[sideKey]++;
+    } else if (ev.type === 'pass_complete') { state.passes[sideKey]++; state.completedPasses[sideKey]++;
+    } else if (ev.type === 'pass_incomplete') { state.passes[sideKey]++;
+    } else if (ev.type === 'offside') { state.offsides[sideKey]++;
     } else if (ev.type === 'yellow_card') { state.yellowCards[sideKey].push(player);
     } else if (ev.type === 'red_card')   { state.redCards[sideKey].push(player);
     } else if (ev.type === 'foul')       { state.fouls[sideKey]++;
@@ -404,7 +417,6 @@ async function processScriptedMinute(state: MatchState, matchId: string) {
       buildCommentary(ev, teamName, scoreStr),
       { score_a: state.scoreA, score_b: state.scoreB, assist: ev.assist, player_on: ev.player_on, player_off: ev.player_off });
   }
-  await interpolateStats(state);
 }
 
 async function handleScriptedFulltime(matchId: string, state: MatchState) {

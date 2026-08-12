@@ -117,7 +117,7 @@ router.get('/:id/heatmap', async (req, res) => {
 
 const scriptEventSchema = z.object({
   minute:      z.number().int().min(1).max(120),
-  type:        z.enum(['goal', 'yellow_card', 'red_card', 'foul', 'corner', 'substitution', 'penalty_missed', 'var_check', 'offside']),
+  type:        z.enum(['goal', 'shot', 'shot_on_target', 'pass_complete', 'pass_incomplete', 'yellow_card', 'red_card', 'foul', 'corner', 'substitution', 'penalty_missed', 'var_check', 'offside']),
   team:        z.enum(['home', 'away']),
   player:      z.string().optional(),
   player_off:  z.string().optional(),
