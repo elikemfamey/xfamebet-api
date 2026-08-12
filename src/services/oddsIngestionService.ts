@@ -73,6 +73,32 @@ function pickBookmaker(bookmakers: OddsApiBookmaker[]): OddsApiBookmaker | null 
   return bookmakers[0];
 }
 
+/**
+ * Combine every available 1X2 line into a vig-free consensus, then apply our
+ * fixed 4% margin. This avoids one bookmaker's stale/outlier price defining
+ * the whole match while retaining provider-sourced market information.
+ */
+function consensusH2h(event: OddsApiEvent): Map<string, number> {
+  const sums = new Map<string, number>();
+  let books = 0;
+  for (const bookmaker of event.bookmakers ?? []) {
+    const market = bookmaker.markets.find(item => item.key === 'h2h');
+    if (!market) continue;
+    const entries = market.outcomes
+      .filter(outcome => Number.isFinite(outcome.price) && outcome.price > 1)
+      .map(outcome => ({
+        selection: outcome.name === event.home_team ? 'home' : outcome.name === event.away_team ? 'away' : 'draw',
+        implied: 1 / outcome.price,
+      }));
+    const total = entries.reduce((sum, entry) => sum + entry.implied, 0);
+    if (entries.length < 2 || total <= 0) continue;
+    books++;
+    for (const entry of entries) sums.set(entry.selection, (sums.get(entry.selection) ?? 0) + entry.implied / total);
+  }
+  if (!books) return new Map();
+  return new Map([...sums].map(([selection, probability]) => [selection, Number((1 / ((probability / books) * 1.04)).toFixed(2))]));
+}
+
 function buildOddsRows(
   event: OddsApiEvent,
   sport: string,
@@ -83,6 +109,7 @@ function buildOddsRows(
 
   const eventName = `${event.home_team} vs ${event.away_team}`;
   const rows = [];
+  const h2hConsensus = consensusH2h(event);
 
   for (const market of bookmaker.markets) {
     for (const outcome of market.outcomes) {
@@ -113,7 +140,7 @@ function buildOddsRows(
         event_name: eventName,
         market_type: marketType,
         selection,
-        odds_value: outcome.price,
+        odds_value: market.key === 'h2h' ? (h2hConsensus.get(selection) ?? outcome.price) : outcome.price,
         source: 'odds_api',
         sport,
         league,

@@ -10,7 +10,7 @@ export interface LiveFeedMatch {
   status: string; home: LiveFeedTeam; away: LiveFeedTeam; homeScore: string | null; awayScore: string | null;
   odds: [string | number, string | number, string | number]; oddsLocked: boolean;
   oddsStatus: 'active' | 'suspended'; oddsLockReason?: string; markets: number; sportKey: string;
-  kickedOffAt: string | null; countryCode?: string | null;
+  kickedOffAt: string | null; countryCode?: string | null; oddsEstimated?: boolean;
   apiFootballFixtureId?: number | null; competitionKey?: string | null; country?: string | null;
 }
 interface OddsRow { event_id: string; event_name: string; market_type: string; selection: string; odds_value: number; sport: string; league: string | null; starts_at: string | null; status: string; source?: string | null; provider_updated_at?: string | null; updated_at?: string | null; is_live?: boolean; }
@@ -20,6 +20,28 @@ const sportFromKey = (key: string) => ({ soccer: 'football', basketball: 'basket
 const status = (score: LiveScore) => score.status_short === 'HT' ? 'HT' : score.status_short === 'BT' ? 'BT' : score.status_short === 'P' ? 'PEN' : score.minute > 0 ? `${score.minute}'` : 'LIVE';
 function h2h(rows: OddsRow[]) { return { home: rows.find(r => r.market_type === 'match_winner' && r.selection === 'home')?.odds_value, draw: rows.find(r => r.market_type === 'match_winner' && r.selection === 'draw')?.odds_value, away: rows.find(r => r.market_type === 'match_winner' && r.selection === 'away')?.odds_value }; }
 function scoreFor(entry: OddsApiScoreEntry, side: 'home' | 'away') { const team = side === 'home' ? entry.home_team : entry.away_team; return entry.scores?.find(s => s.name === team)?.score ?? null; }
+
+// A display-only fallback when a live provider is unavailable. It uses a
+// neutral Poisson remaining-goals estimate; markets remain suspended and it
+// never creates a price that can be placed in a bet slip.
+function liveEstimate(homeScore: number, awayScore: number, minute: number): [number, number, number] {
+  const remaining = Math.max(0, 90 - Math.min(90, minute));
+  const lambda = 2.55 * remaining / 90 / 2;
+  const pmf = (goals: number) => {
+    let value = Math.exp(-lambda);
+    for (let i = 1; i <= goals; i++) value = value * lambda / i;
+    return value;
+  };
+  let home = 0, draw = 0, away = 0;
+  for (let h = 0; h <= 9; h++) for (let a = 0; a <= 9; a++) {
+    const probability = pmf(h) * pmf(a);
+    if (homeScore + h > awayScore + a) home += probability;
+    else if (homeScore + h < awayScore + a) away += probability;
+    else draw += probability;
+  }
+  const total = home + draw + away;
+  return [home, draw, away].map(probability => Number((1 / (Math.max(0.005, probability / total) * 1.04)).toFixed(2))) as [number, number, number];
+}
 
 export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
   const [footballScores, oddsScores, oddsResult, simulations] = await Promise.all([
@@ -44,7 +66,8 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     const fresh = apiFresh || fallbackFresh;
     const prices = fresh ? h2h(selectedRows.filter(row => row.status === 'active')) : { home: undefined, draw: undefined, away: undefined };
     const locked = !fresh || prices.home == null || prices.away == null;
-    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: [locked ? '-' : prices.home!, locked ? '-' : prices.draw ?? '-', locked ? '-' : prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Live markets are temporarily suspended while verified odds are unavailable.' : undefined, markets: locked ? 0 : selectedRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null, apiFootballFixtureId: score.fixture_id, competitionKey: score.competition_key ?? `api-football:${score.league}`, country: score.country ?? null });
+    const estimate = locked ? liveEstimate(score.home_score, score.away_score, score.minute) : null;
+    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: locked ? estimate! : [prices.home!, prices.draw ?? '-', prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Estimated view only — live betting resumes when verified provider prices return.' : undefined, oddsEstimated: locked, markets: locked ? 0 : selectedRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null, apiFootballFixtureId: score.fixture_id, competitionKey: score.competition_key ?? `api-football:${score.league}`, country: score.country ?? null });
   }
 
   // Other sports require a score-bearing Odds API entry; football is deliberately excluded above.

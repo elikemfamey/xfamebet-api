@@ -315,6 +315,7 @@ function buildOddsRows(ctx: OddsContext): object[] {
   push('total_goals_exact', '2_3',   toOdds(p23));
   push('total_goals_exact', '4plus', toOdds(p4plus));
 
+
   // ── 6. Clean Sheet ────────────────────────────────────────────────────────
   //  Home clean sheet: B must score 0 more goals. If B already scored → impossible.
   const pCleanHome = scoreB === 0 ? Math.max(0.005, pPmf(0, lambdaB)) : 0.005;
