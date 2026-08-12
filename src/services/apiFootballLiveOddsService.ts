@@ -7,17 +7,21 @@ import { logger } from '../utils/logger';
 import { LiveScore } from './liveScoreService';
 
 function normalizeOdds(event: any) {
-  const bookmaker = event.bookmakers?.[0];
-  if (!bookmaker) return [];
-  return (bookmaker.bets ?? []).flatMap((bet: any) => {
-    if (!/match winner|winner|1x2/i.test(String(bet.name ?? ''))) return [];
-    return (bet.values ?? []).map((value: any) => {
+  const suspended = event?.status?.stopped || event?.status?.blocked || event?.status?.finished;
+  for (const bookmaker of event?.bookmakers ?? []) {
+    const bet = (bookmaker.bets ?? []).find((item: any) => /^(match winner|1x2|fulltime result)$/i.test(String(item.name ?? '').trim()));
+    if (!bet?.values) continue;
+    const mainValues = bet.values.filter((value: any) => value.main !== false);
+    const values = mainValues.length ? mainValues : bet.values;
+    const rows = values.map((value: any) => {
       const label = String(value.value ?? '').trim().toLowerCase();
       const selection = label === 'home' || label === '1' ? 'home' : label === 'away' || label === '2' ? 'away' : label === 'draw' || label === 'x' ? 'draw' : null;
       const odds_value = Number(value.odd);
-      return selection && Number.isFinite(odds_value) && odds_value >= 1.01 ? { market_type: 'match_winner', selection, odds_value } : null;
-    }).filter(Boolean);
-  });
+      return selection && Number.isFinite(odds_value) && odds_value >= 1.01 ? { market_type: 'match_winner', selection, odds_value, active: !suspended } : null;
+    }).filter(Boolean) as Array<{ market_type: string; selection: string; odds_value: number; active: boolean }>;
+    if (rows.some(row => row.selection === 'home') && rows.some(row => row.selection === 'away')) return rows;
+  }
+  return [];
 }
 
 async function clearEvent(eventId: string) {
@@ -53,7 +57,7 @@ export async function ingestApiFootballLiveOdds(scores: LiveScore[]): Promise<vo
     const odds = normalizeOdds(events.get(score.fixture_id));
     await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: 'Awaiting refreshed API-Football live odds.', updated_at: now }).eq('event_id', eventId).eq('is_live', true);
     if (!odds.length) { await clearEvent(eventId); continue; }
-    const rows = odds.map((odd: any) => ({ event_id: eventId, event_name: `${score.home_team} vs ${score.away_team}`, market_type: odd.market_type, selection: odd.selection, odds_value: odd.odds_value, source: 'api_football_live', sport: 'football', league: score.league, starts_at: score.starts_at ?? null, status: 'active', lock_reason: null, is_live: true, provider_updated_at: now, updated_at: now }));
+    const rows = odds.map((odd: any) => ({ event_id: eventId, event_name: `${score.home_team} vs ${score.away_team}`, market_type: odd.market_type, selection: odd.selection, odds_value: odd.odds_value, source: 'api_football_live', sport: 'football', league: score.league, starts_at: score.starts_at ?? null, status: odd.active ? 'active' : 'suspended', lock_reason: odd.active ? null : 'Suspended by API-Football live odds provider.', is_live: true, provider_updated_at: now, updated_at: now }));
     const { error } = await supabase.from('odds_feed').upsert(rows, { onConflict: 'event_id,market_type,selection' });
     if (error) { logger.warn('[ApiFootballOdds] Failed to store live odds', { eventId, message: error.message }); continue; }
     await clearEvent(eventId); broadcastOddsUpdate(eventId, rows);
