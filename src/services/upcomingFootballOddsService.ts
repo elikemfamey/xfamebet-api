@@ -158,7 +158,18 @@ export async function getUpcomingFootballFixtures(liveFixtureIds: number[] = [])
     return [];
   }
   const ids = mappings.map(row => row.canonical_event_id);
-  const { data: rows } = ids.length ? await supabase.from('odds_feed').select('*').in('event_id', ids).eq('is_live', false).in('source', ['api_football_upcoming', 'odds_api_io_upcoming']).in('status', ['active', 'suspended']) : { data: [] as any[] };
+  // PostgREST encodes `IN (...)` values in the URL. A month of fixtures can
+  // exceed its URL limit, which previously failed silently and made every
+  // upcoming card look locked even when active fallback odds existed.
+  const oddsChunks: any[][] = [];
+  for (let index = 0; index < ids.length; index += 100) {
+    const { data, error: oddsError } = await supabase.from('odds_feed').select('*')
+      .in('event_id', ids.slice(index, index + 100)).eq('is_live', false)
+      .in('source', ['api_football_upcoming', 'odds_api_io_upcoming']).in('status', ['active', 'suspended']);
+    if (oddsError) logger.warn('[UpcomingFootball] Odds chunk query failed', { message: oddsError.message, index });
+    if (data?.length) oddsChunks.push(data);
+  }
+  const rows = oddsChunks.flat();
   const byEvent = new Map<string, any[]>(); for (const row of rows ?? []) byEvent.set(row.event_id, [...(byEvent.get(row.event_id) ?? []), row]);
   const canonicalFixtures = mappings.map((mapping: Mapping) => {
     const allOdds = byEvent.get(mapping.canonical_event_id) ?? [];
