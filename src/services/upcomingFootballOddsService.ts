@@ -121,9 +121,14 @@ export async function expireStaleUpcomingFootballOdds(): Promise<void> {
 
 export async function ingestUpcomingFootballOdds(): Promise<void> {
   const startedAt = new Date().toISOString();
+  // The fallback uses persisted API-Football fixture mappings, so it does not
+  // need to wait for the potentially long 30-day primary catalogue refresh.
+  // Running it independently makes a restarted service useful immediately.
+  const fallbackRefresh = refreshOddsApiIoUpcomingFallback().catch((error: any) => {
+    logger.warn('[UpcomingFootball] Odds-API.io fallback refresh failed', { message: error?.message ?? String(error) });
+  });
   try {
     await ingestApiFootballUpcomingOdds();
-    await refreshOddsApiIoUpcomingFallback();
     await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football', lastSuccessAt: startedAt, lastFailureAt: null, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
   } catch (error: any) {
     // Keep the last accepted API-Football snapshot through its one-hour
@@ -133,8 +138,8 @@ export async function ingestUpcomingFootballOdds(): Promise<void> {
     let lastSuccessAt: string | null = null;
     try { lastSuccessAt = previous ? JSON.parse(previous).lastSuccessAt ?? null : null; } catch { /* ignore corrupt health metadata */ }
     await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football_unavailable', lastSuccessAt, lastFailureAt: startedAt, lastFailure: error.message, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
-    await refreshOddsApiIoUpcomingFallback();
   }
+  await fallbackRefresh;
   await expireStaleUpcomingFootballOdds();
 }
 

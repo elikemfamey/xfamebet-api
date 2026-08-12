@@ -145,13 +145,16 @@ export async function ingestOddsApiIoLiveFallback(scores: LiveScore[], apiPriced
 }
 
 export async function refreshOddsApiIoUpcomingFallback(): Promise<void> {
-  if (!env.ODDS_API_IO_KEY) return;
+  if (!env.ODDS_API_IO_KEY) {
+    logger.warn('[OddsApiIo] Upcoming fallback skipped because ODDS_API_IO_KEY is not configured');
+    return;
+  }
   const today = new Date().toISOString().slice(0, 10);
   // This provider is deliberately refreshed once per UTC day, including after
   // restarts and across horizontally scaled API workers.
   const dailyLock = await redis.set(`odds_api_io:upcoming_refresh:${today}`, '1', 'EX', 2 * 24 * 60 * 60, 'NX');
   if (dailyLock !== 'OK') return;
-  const catalogue: any = await request('/events', { sport: 'football', limit: 500 });
+  const catalogue: any = await request('/events', { sport: 'football', status: 'pending', limit: 500 });
   const providerEvents = (Array.isArray(catalogue) ? catalogue : catalogue?.data ?? catalogue?.events ?? []).map(eventFrom).filter(Boolean) as ProviderEvent[];
   if (!providerEvents.length) {
     // A failed/malformed catalogue fetch must be retried by the next upcoming
@@ -180,7 +183,7 @@ export async function refreshOddsApiIoUpcomingFallback(): Promise<void> {
       if (payload) await writeSnapshot(mapping, String(mapping.odds_api_io_event_id), false, payload);
     }
   }
-  logger.info('[OddsApiIo] Upcoming fallback refreshed', { mapped: matched.length, candidates: candidates.length });
+  logger.info('[OddsApiIo] Upcoming fallback refreshed', { providerEvents: providerEvents.length, mapped: matched.length, candidates: candidates.length });
 }
 
 export function isOddsApiIoLiveFresh(row: { source?: string | null; provider_updated_at?: string | null; updated_at?: string | null }): boolean {
