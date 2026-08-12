@@ -5,7 +5,6 @@ import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { broadcastOddsUpdate } from '../socket';
 import { getSportMonksFixtureId } from './liveFixtureIdentityService';
-import { regulateOdds } from './liveOddsRegulator';
 
 const BASE_URL = 'https://api.sportmonks.com/v3/football';
 export const LIVE_ODDS_MAX_AGE_MS = 45_000;
@@ -117,26 +116,18 @@ export function areLiveOddsFresh(rows: Array<{ provider_updated_at?: string | nu
 
 type LiveOddsEvent = { eventId: string; eventName: string; league: string | null; startsAt: string | null; homeScore: number; awayScore: number; minute: number; status: string };
 
-async function regulateInternalLiveFallback(event: LiveOddsEvent): Promise<void> {
-  const [teamAName, teamBName = 'Away'] = event.eventName.split(/\s+vs\.?\s+/i);
-  const firstHalf = event.minute < 46 && event.status !== 'HT';
-  await regulateOdds({ matchId: event.eventId, eventId: event.eventId, source: 'internal_live_fallback', isLive: true,
-    sport: 'football', league: event.league ?? 'Live Football', startsAt: event.startsAt ?? new Date().toISOString(),
-    teamAName, teamBName, scoreA: event.homeScore, scoreB: event.awayScore, currentMinute: event.minute,
-    duration: 90, goalProb: 0.028, teamAStrength: 5, teamBStrength: 5,
-    phase: firstHalf ? 'first_half' : 'second_half', firstScorerTeam: event.homeScore + event.awayScore > 0 ? 'recorded' : null,
-  });
+async function suspendUnavailableLiveOdds(eventId: string): Promise<void> {
+  await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: 'Live markets suspended while verified SportMonks odds are unavailable.', updated_at: new Date().toISOString() })
+    .eq('event_id', eventId).eq('is_live', true);
+  await redis.del(REDIS_KEYS.LIVE_ODDS(eventId));
+  const keys = await redis.keys('live_feed:*'); if (keys.length) await redis.del(...keys);
 }
 
 export async function ingestLiveOddsForEvents(events: LiveOddsEvent[]): Promise<void> {
+  let unavailable = 0;
   for (const event of events) {
     try { await ingestSportMonksLiveOdds(event.eventId, event.eventName, event.league, event.startsAt); }
-    catch (err: any) {
-      // The Odds API feed is pre-match/slow-refresh and must never be reused as
-      // an in-play price. It caused stale prices (for example, 6-0 still priced
-      // near even money). Recalculate from the current verified score instead.
-      logger.warn('[SportMonksOdds] Live odds unavailable; using score-regulated fallback', { eventId: event.eventId, message: err.message });
-      await regulateInternalLiveFallback(event);
-    }
+    catch { unavailable++; await suspendUnavailableLiveOdds(event.eventId); }
   }
+  if (unavailable) logger.warn('[SportMonksOdds] Live markets suspended because verified odds are unavailable', { events: unavailable });
 }
