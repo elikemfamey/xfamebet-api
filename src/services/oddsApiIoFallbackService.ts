@@ -14,6 +14,9 @@ const UPCOMING_MAX_AGE_MS = 24 * 60 * 60_000;
 const MAX_LIVE_EVENTS = 10;
 const DAILY_LIMIT = 500;
 const HOURLY_LIMIT = 100;
+// Odds-API.io requires a bookmaker filter for the batch odds endpoint. Keep
+// this list small for the free tier and normalize the first available 1X2 line.
+const FALLBACK_BOOKMAKERS = 'Bet365,SportyBet';
 
 type ProviderEvent = { id: string; home: string; away: string; startsAt: string; raw: any };
 type Mapping = { canonical_event_id: string; api_football_fixture_id?: number | null; odds_api_io_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_name?: string | null; competition_key?: string | null; country_name?: string | null };
@@ -99,7 +102,7 @@ async function writeSnapshot(mapping: Mapping, providerEventId: string, isLive: 
 
 async function fetchMulti(eventIds: string[]): Promise<Map<string, any>> {
   if (!eventIds.length) return new Map();
-  const data: any = await request('/odds/multi', { eventIds: eventIds.join(',') });
+  const data: any = await request('/odds/multi', { eventIds: eventIds.join(','), bookmakers: FALLBACK_BOOKMAKERS });
   const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.events) ? data.events : [];
   return new Map(rows.map((row: any) => [String(row?.id ?? row?.eventId ?? row?.event_id), row]));
 }
