@@ -1,13 +1,10 @@
 import cron from 'node-cron';
 import { supabase } from '../config/supabase';
 import { redis } from '../config/redis';
-import { ingestAllOdds, getActiveSports } from '../services/oddsIngestionService';
 import { fetchAndCacheLiveScores as fetchFromSportMonks, fetchLatestLiveScoreUpdates } from '../services/sportmonksLiveScoreService';
 import { fetchAndCacheLiveScores as fetchFromApiFootball, getCachedLiveScores } from '../services/liveScoreService';
-import { fetchAllSportsScores } from '../services/oddsApiScoreService';
 import { ensureSportMonksFixtureMapping, resolveCanonicalEventId } from '../services/liveFixtureIdentityService';
 import { ingestLiveOddsForEvents } from '../services/sportmonksLiveOddsService';
-import { settlePendingBets } from '../services/betSettlementService';
 import { SimulationEngine } from '../services/simulationEngine';
 import { ScriptedMatchEngine } from '../services/scriptedMatchEngine';
 import { refreshPopularMatches } from '../services/popularMatchService';
@@ -157,15 +154,6 @@ export function startWorkers() {
 
   // Sportsbook/live data ingestion. Simulations are started only through admin routes.
 
-  // Ingest real odds from The Odds API every 5 minutes
-  cron.schedule('*/5 * * * *', async () => {
-    try {
-      await ingestAllOdds();
-    } catch (err) {
-      logger.error('Odds ingestion worker error', { err });
-    }
-  });
-
   // Upcoming football is deliberately independent from live odds: SportMonks
   // is primary and The Odds API is used only by its dedicated fallback service.
   cron.schedule('0 */5 * * *', () => {
@@ -189,36 +177,14 @@ export function startWorkers() {
   // (only fixtures that changed in the last 10s — cheap, high-frequency)
   setInterval(() => { fetchLiveOdds().catch(err => logger.warn('Live odds worker error', { err })); }, 15_000);
 
-  // Fetch Odds API scores for all active sports every 2 minutes (covers all sports)
-  cron.schedule('*/2 * * * *', async () => {
-    try {
-      const sports = await getActiveSports();
-      await fetchAllSportsScores(sports.map(s => s.key));
-    } catch (err) {
-      logger.error('Odds API scores worker error', { err });
-    }
-  });
-
-  // Auto-settle completed bets every 5 minutes using Odds API scores
-  cron.schedule('*/5 * * * *', async () => {
-    try {
-      await settlePendingBets();
-    } catch (err) {
-      logger.error('Bet settlement worker error', { err });
-    }
-  });
-
   // Run one immediate ingestion pass on startup (non-blocking)
   setImmediate(async () => {
     // Start the small, customer-facing upcoming pipeline first. The older
-    // all-sports ingestion may take much longer and must not delay it.
+    // live-score refresh may take longer and must not delay it.
     ingestUpcomingFootballOdds().catch(err => logger.error('Initial upcoming football ingestion error', { err }));
     try {
-      await ingestAllOdds();
       await fetchLiveScores();
       await fetchLiveOdds();
-      const sports = await getActiveSports();
-      await fetchAllSportsScores(sports.map(s => s.key));
       await refreshPopularMatches();
     } catch (err) {
       logger.error('Initial ingestion error', { err });
