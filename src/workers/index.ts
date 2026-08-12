@@ -11,6 +11,7 @@ import { refreshPopularMatches } from '../services/popularMatchService';
 import { logger } from '../utils/logger';
 import { MoolreService } from '../services/moolreService';
 import { ingestUpcomingFootballOdds, expireStaleUpcomingFootballOdds } from '../services/upcomingFootballOddsService';
+import { settlePendingBets } from '../services/betSettlementService';
 
 async function fetchLiveScores(): Promise<void> {
   try {
@@ -163,6 +164,9 @@ export function startWorkers() {
   cron.schedule('0 * * * *', () => {
     expireStaleUpcomingFootballOdds().catch(err => logger.error('Upcoming football odds expiry error', { err }));
   });
+  cron.schedule('*/5 * * * *', () => {
+    settlePendingBets().catch(err => logger.error('Football settlement worker error', { err }));
+  });
 
   // Fetch live scores every minute — SportMonks primary, api-football fallback
   setInterval(async () => {
@@ -185,6 +189,7 @@ export function startWorkers() {
     try {
       await fetchLiveScores();
       await fetchLiveOdds();
+      await settlePendingBets();
       await refreshPopularMatches();
     } catch (err) {
       logger.error('Initial ingestion error', { err });

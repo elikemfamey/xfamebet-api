@@ -8,7 +8,7 @@ import { redis } from '../config/redis';
 import { logger } from '../utils/logger';
 import { env } from '../config/env';
 
-interface OddsApiScore {
+interface CompletedFootballScore {
   id: string;
   sport_key: string;
   home_team: string;
@@ -17,30 +17,7 @@ interface OddsApiScore {
   scores: Array<{ name: string; score: string }> | null;
 }
 
-async function fetchScoresForSport(sportKey: string): Promise<OddsApiScore[]> {
-  const cacheKey = `settlement:scores:${sportKey}`;
-  const cached = await redis.get(cacheKey);
-  if (cached) return JSON.parse(cached);
-
-  try {
-    const resp = await axios.get(
-      `https://api.the-odds-api.com/v4/sports/${sportKey}/scores/`,
-      {
-        params: { apiKey: env.ODDS_API_KEY, daysFrom: 2 },
-        timeout: 15000,
-      },
-    );
-    const scores: OddsApiScore[] = resp.data ?? [];
-    await redis.setex(cacheKey, 300, JSON.stringify(scores)); // cache 5 min per sport
-    return scores;
-  } catch (err: any) {
-    if (err.response?.status === 422) return []; // sport has no scores endpoint
-    logger.error(`[Settlement] Score fetch failed for ${sportKey}`, { message: err.message });
-    return [];
-  }
-}
-
-function getMatchWinner(event: OddsApiScore): 'home' | 'away' | 'draw' | null {
+function getMatchWinner(event: CompletedFootballScore): 'home' | 'away' | 'draw' | null {
   if (!event.scores || event.scores.length < 2) return null;
   const homeEntry = event.scores.find(s => s.name === event.home_team);
   const awayEntry = event.scores.find(s => s.name === event.away_team);
@@ -56,7 +33,7 @@ function getMatchWinner(event: OddsApiScore): 'home' | 'away' | 'draw' | null {
 
 // Determine if a single selection won based on the completed event's score
 function selectionWon(
-  event: OddsApiScore,
+  event: CompletedFootballScore,
   marketType: string,
   selection: string,
 ): boolean | null {
@@ -103,9 +80,9 @@ function selectionWon(
 }
 
 export async function settlePendingBets(): Promise<void> {
-  if (!env.ODDS_API_KEY) return;
+  if (!env.SPORTMONKS_API_TOKEN && !env.API_FOOTBALL_KEY) return;
 
-  // Load all pending bets that came from the real Odds API (not simulated)
+  // Only real upcoming football events use this provider-backed settlement.
   const { data: pendingBets, error } = await supabase
     .from('bets')
     .select('id, user_id, stake, potential_payout, share_code, bet_selections(event_id, market_type, selection)')
@@ -114,37 +91,44 @@ export async function settlePendingBets(): Promise<void> {
   if (error) { logger.error('[Settlement] Failed to load pending bets', { message: error.message }); return; }
   if (!pendingBets?.length) return;
 
-  // Filter out purely simulated bets (event_id starts with sim: or af:)
+  // Simulations settle in their own engine; legacy/non-football bets are left
+  // untouched until a dedicated settlement source is configured for them.
   const realBets = pendingBets.filter(bet =>
     (bet.bet_selections as any[]).every((sel: any) =>
-      !sel.event_id.startsWith('sim:') && !sel.event_id.startsWith('af:')
+      sel.event_id.startsWith('upcoming:football:')
     )
   );
   if (!realBets.length) return;
 
-  // Collect all unique event IDs and resolve their sport_key from Redis cache
   const allEventIds = [...new Set(
     realBets.flatMap(b => (b.bet_selections as any[]).map((s: any) => s.event_id))
   )];
-
-  const sportKeyToEventIds = new Map<string, Set<string>>();
-  for (const eventId of allEventIds) {
-    const sportKey = await redis.get(`event:sport_key:${eventId}`);
-    if (!sportKey) continue;
-    if (!sportKeyToEventIds.has(sportKey)) sportKeyToEventIds.set(sportKey, new Set());
-    sportKeyToEventIds.get(sportKey)!.add(eventId);
-  }
-
-  if (sportKeyToEventIds.size === 0) return;
-
-  // Fetch completed scores per sport key and build a result map: eventId → OddsApiScore
-  const completedEvents = new Map<string, OddsApiScore>();
-  for (const sportKey of sportKeyToEventIds.keys()) {
-    const scores = await fetchScoresForSport(sportKey);
-    for (const evt of scores) {
-      if (evt.completed) completedEvents.set(evt.id, evt);
+  const { data: mappings } = await supabase.from('upcoming_football_fixture_mappings')
+    .select('canonical_event_id,sportmonks_fixture_id,api_football_fixture_id,home_team,away_team').in('canonical_event_id', allEventIds);
+  const completedEvents = new Map<string, CompletedFootballScore>();
+  for (const mapping of mappings ?? []) {
+    const cacheKey = `settlement:football:${mapping.canonical_event_id}`;
+    const cached = await redis.get(cacheKey); if (cached) { completedEvents.set(mapping.canonical_event_id, JSON.parse(cached)); continue; }
+    let score: CompletedFootballScore | null = null;
+    if (mapping.sportmonks_fixture_id && env.SPORTMONKS_API_TOKEN) {
+      try {
+        const response = await axios.get(`https://api.sportmonks.com/v3/football/fixtures/${mapping.sportmonks_fixture_id}`, { params: { api_token: env.SPORTMONKS_API_TOKEN, include: 'participants;scores;state' }, timeout: 12_000 });
+        const fixture = response.data?.data; const state = fixture?.state?.developer_name;
+        const participants = fixture?.participants ?? []; const home = participants.find((p: any) => p.meta?.location === 'home'); const away = participants.find((p: any) => p.meta?.location === 'away');
+        if (['FT', 'AET', 'FT_PEN'].includes(state) && home && away) {
+          const scores = fixture.scores ?? [];
+          score = { id: mapping.canonical_event_id, sport_key: 'football', home_team: mapping.home_team, away_team: mapping.away_team, completed: true, scores: [{ name: mapping.home_team, score: String(scores.find((s: any) => s.participant_id === home.id && s.description === 'CURRENT')?.score?.goals ?? 0) }, { name: mapping.away_team, score: String(scores.find((s: any) => s.participant_id === away.id && s.description === 'CURRENT')?.score?.goals ?? 0) }] };
+        }
+      } catch (err: any) { logger.warn('[Settlement] SportMonks final-score fetch failed', { eventId: mapping.canonical_event_id, message: err.message }); }
     }
-    await new Promise(r => setTimeout(r, 250)); // polite pause between API calls
+    if (!score && mapping.api_football_fixture_id && env.API_FOOTBALL_KEY) {
+      try {
+        const response = await axios.get('https://v3.football.api-sports.io/fixtures', { params: { id: mapping.api_football_fixture_id }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000 });
+        const fixture = response.data?.response?.[0];
+        if (fixture && ['FT', 'AET', 'PEN'].includes(fixture.fixture?.status?.short)) score = { id: mapping.canonical_event_id, sport_key: 'football', home_team: mapping.home_team, away_team: mapping.away_team, completed: true, scores: [{ name: mapping.home_team, score: String(fixture.goals?.home ?? 0) }, { name: mapping.away_team, score: String(fixture.goals?.away ?? 0) }] };
+      } catch (err: any) { logger.warn('[Settlement] API-Football final-score fetch failed', { eventId: mapping.canonical_event_id, message: err.message }); }
+    }
+    if (score) { completedEvents.set(mapping.canonical_event_id, score); await redis.setex(cacheKey, 300, JSON.stringify(score)); }
   }
 
   if (completedEvents.size === 0) return;
