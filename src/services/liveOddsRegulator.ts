@@ -368,3 +368,33 @@ function buildOddsRows(ctx: OddsContext): object[] {
 
   return rows;
 }
+
+export type FootballEstimateInput = {
+  eventId: string; home: string; away: string; league: string; startsAt: string;
+  isLive: boolean; homeScore?: number; awayScore?: number; minute?: number;
+};
+
+/**
+ * Produces the same complete market catalogue used by virtual football, but
+ * never persists it. Consumers must present these rows as suspended estimates.
+ */
+export function estimateFootballMarkets(input: FootballEstimateInput): Array<Record<string, unknown>> {
+  const hash = (value: string) => {
+    let result = 2166136261;
+    for (const character of value.toLowerCase()) result = Math.imul(result ^ character.charCodeAt(0), 16777619);
+    return result >>> 0;
+  };
+  const scoreA = input.homeScore ?? 0;
+  const scoreB = input.awayScore ?? 0;
+  const minute = Math.max(0, Math.min(90, input.minute ?? 0));
+  const rows = buildOddsRows({
+    matchId: input.eventId, eventId: input.eventId, source: 'estimate', isLive: input.isLive,
+    sport: 'football', league: input.league, startsAt: input.startsAt, teamAName: input.home, teamBName: input.away,
+    scoreA, scoreB, currentMinute: minute, duration: 90, goalProb: 2.55 / 90,
+    teamAStrength: 6 + hash(input.home) % 5, teamBStrength: 6 + hash(input.away) % 5,
+    phase: !input.isLive || minute <= 45 ? 'first_half' : 'second_half',
+    firstScorerTeam: scoreA > 0 ? 'home' : scoreB > 0 ? 'away' : null,
+  }) as Array<Record<string, unknown>>;
+  const lockReason = 'Estimated prices — betting is suspended until a verified provider price is available.';
+  return rows.map(row => ({ ...row, status: 'suspended', lock_reason: lockReason, estimated: true }));
+}

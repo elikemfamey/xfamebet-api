@@ -5,6 +5,7 @@ import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { broadcastOddsUpdate } from '../socket';
 import { isUpcomingFallbackFresh, refreshOddsApiIoUpcomingFallback } from './oddsApiIoFallbackService';
+import { estimateFootballMarkets } from './liveOddsRegulator';
 
 export const UPCOMING_ODDS_MAX_AGE_MS = 60 * 60 * 1000;
 const HEALTH_KEY = 'upcoming_football:provider_health';
@@ -177,10 +178,12 @@ export async function getUpcomingFootballFixtures(liveFixtureIds: number[] = [])
     const fallbackOdds = allOdds.filter(row => row.source === 'odds_api_io_upcoming');
     const primaryFresh = apiOdds.some(row => row.status === 'active' && row.provider_updated_at && Date.now() - new Date(row.provider_updated_at).getTime() <= UPCOMING_ODDS_MAX_AGE_MS);
     const fallbackFresh = fallbackOdds.some(row => row.status === 'active' && isUpcomingFallbackFresh(row));
-    const odds = primaryFresh ? apiOdds : fallbackFresh ? fallbackOdds : allOdds;
+    const estimated = !primaryFresh && !fallbackFresh;
+    const estimatedMarkets = estimated ? estimateFootballMarkets({ eventId: mapping.canonical_event_id, home: mapping.home_team, away: mapping.away_team, league: mapping.competition_name, startsAt: mapping.starts_at, isLive: false }) : undefined;
+    const odds = primaryFresh ? apiOdds : fallbackFresh ? fallbackOdds : estimatedMarkets!.filter(row => row.market_type === 'match_winner');
     const fresh = primaryFresh || fallbackFresh;
     return { eventId: mapping.canonical_event_id, apiFootballFixtureId: mapping.api_football_fixture_id ?? null, home: mapping.home_team, away: mapping.away_team, startsAt: mapping.starts_at, sport: 'football', competitionKey: mapping.competition_key, competitionName: mapping.competition_name, country: mapping.country_name ?? null,
-      oddsStatus: fresh ? 'active' : 'suspended', oddsLockReason: fresh ? undefined : odds[0]?.lock_reason ?? 'Markets suspended while verified prices are unavailable.', odds };
+      oddsStatus: fresh ? 'active' : 'suspended', oddsLockReason: fresh ? undefined : String(odds[0]?.lock_reason ?? 'Estimated prices — betting is suspended until a verified provider price is available.'), odds, oddsEstimated: estimated, estimatedMarkets };
   });
   if (canonicalFixtures.length) return canonicalFixtures;
 
