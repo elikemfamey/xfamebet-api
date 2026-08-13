@@ -11,6 +11,7 @@ export interface LiveFeedMatch {
   status: string; home: LiveFeedTeam; away: LiveFeedTeam; homeScore: string | null; awayScore: string | null;
   odds: [string | number, string | number, string | number]; oddsLocked: boolean;
   oddsStatus: 'active' | 'suspended'; oddsLockReason?: string; markets: number; sportKey: string;
+  headlineOdds?: Array<{ selection: 'home' | 'draw' | 'away'; odds_value: number; status: string; lock_reason?: string | null }>;
   kickedOffAt: string | null; countryCode?: string | null; oddsEstimated?: boolean; estimatedMarkets?: Array<Record<string, unknown>>;
   apiFootballFixtureId?: number | null; competitionKey?: string | null; country?: string | null;
 }
@@ -82,8 +83,15 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
   }
 
   for (const match of simulations.data ?? []) {
-    if (sport && match.sport !== sport) continue; const eventId = `sim:${match.id}`; const rows = byEvent.get(eventId) ?? []; const prices = h2h(rows.filter(r => r.status === 'active')); const locked = prices.home == null || prices.away == null;
-    result.push({ eventId, oddsEventId: eventId, league: match.competition ?? match.league_name ?? 'PrimeWin League', sport: match.sport ?? 'football', isLive: true, status: (match.current_minute ?? 0) > 0 ? `${match.current_minute}'` : 'LIVE', home: { name: match.team_a, logoUrl: match.home_logo ?? null }, away: { name: match.team_b, logoUrl: match.away_logo ?? null }, homeScore: String(match.team_a_score ?? 0), awayScore: String(match.team_b_score ?? 0), odds: [locked ? '-' : prices.home!, locked ? '-' : prices.draw ?? '-', locked ? '-' : prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Markets suspended.' : undefined, markets: rows.length, sportKey: match.sport ?? 'football', kickedOffAt: match.started_at ?? null, countryCode: match.country_code ?? null });
+    if (sport && match.sport !== sport) continue;
+    const eventId = `sim:${match.id}`;
+    const rows = byEvent.get(eventId) ?? [];
+    const headlineOdds = (['home', 'draw', 'away'] as const).map(selection => {
+      const row = rows.find(item => item.market_type === 'match_winner' && item.selection === selection);
+      return { selection, odds_value: Number(row?.odds_value ?? 0), status: row?.status ?? 'suspended', lock_reason: (row as any)?.lock_reason ?? 'Market unavailable.' };
+    });
+    const locked = headlineOdds.every(odd => odd.status !== 'active');
+    result.push({ eventId, oddsEventId: eventId, league: match.competition ?? match.league_name ?? 'PrimeWin League', sport: match.sport ?? 'football', isLive: true, status: (match.current_minute ?? 0) > 0 ? `${match.current_minute}'` : 'LIVE', home: { name: match.team_a, logoUrl: match.home_logo ?? null }, away: { name: match.team_b, logoUrl: match.away_logo ?? null }, homeScore: String(match.team_a_score ?? 0), awayScore: String(match.team_b_score ?? 0), odds: [headlineOdds[0].odds_value, headlineOdds[1].odds_value, headlineOdds[2].odds_value], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Markets suspended.' : undefined, headlineOdds, markets: rows.length, sportKey: match.sport ?? 'football', kickedOffAt: match.started_at ?? null, countryCode: match.country_code ?? null });
   }
   return result.sort((a, b) => Number(b.homeScore !== null) - Number(a.homeScore !== null));
 }

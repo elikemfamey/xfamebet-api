@@ -17,6 +17,7 @@ import { broadcastOddsUpdate } from '../socket';
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const MARGIN  = 1.05;   // 5 % bookmaker overround
+const AUTO_SUSPEND_PROBABILITY = 0.80;
 const MIN_ODDS = 1.01;
 const MAX_ODDS = 200;
 const MAX_EXTRA_GOALS = 12; // max additional goals per team in Poisson grid
@@ -214,21 +215,24 @@ export async function regulateOdds(ctx: OddsContext): Promise<void> {
     .from('odds_feed')
     .upsert(rows, { onConflict: 'event_id,market_type,selection' });
 
-  // Close markets that are decided or overwhelmingly certain. Admin locks are preserved.
+  // Close only the selection that is overwhelmingly likely.  The remaining
+  // selections must stay available: a probable home win must not hide Draw and
+  // Away from customers.
   const eventId = ctx.eventId ?? `sim:${ctx.matchId}`;
-  const locks: Array<{ market: string; reason: string }> = [];
+  const locks: Array<{ market: string; selection?: string; reason: string }> = [];
   if (ctx.firstScorerTeam) locks.push({ market: 'first_team_to_score', reason: 'First goal has been scored' });
   if (!['first_half', 'halftime_extra'].includes(ctx.phase)) locks.push({ market: 'half_time_result', reason: 'Half-time market is closed' });
-  const byMarket = new Map<string, any[]>();
-  for (const row of rows as any[]) byMarket.set(row.market_type, [...(byMarket.get(row.market_type) ?? []), row]);
-  for (const [market, entries] of byMarket) {
-    const leading = Math.min(...entries.map(entry => entry.odds_value));
-    const impliedProbability = 1 / (leading * MARGIN);
-    if (impliedProbability >= 0.95) locks.push({ market, reason: 'Outcome probability is at least 95%' });
+  for (const entry of rows as any[]) {
+    const impliedProbability = 1 / (entry.odds_value * MARGIN);
+    if (impliedProbability >= AUTO_SUSPEND_PROBABILITY) {
+      locks.push({ market: entry.market_type, selection: entry.selection, reason: 'Outcome probability is at least 80%' });
+    }
   }
   for (const lock of locks) {
-    await supabase.from('odds_feed').update({ status: 'suspended', lock_reason: lock.reason })
+    let query = supabase.from('odds_feed').update({ status: 'suspended', lock_reason: lock.reason })
       .eq('event_id', eventId).eq('market_type', lock.market).eq('locked_by_admin', false).eq('status', 'active');
+    if (lock.selection) query = query.eq('selection', lock.selection);
+    await query;
   }
 
   // Broadcast the persisted rows (including market state and lock reason), not
