@@ -508,7 +508,10 @@ router.post('/affiliates/bulk-action', validateBody(z.object({
   if (action === 'approve') {
     const { data: affs } = await supabase.from('affiliates').select('user_id').in('id', ids);
     const userIds = (affs ?? []).map(a => a.user_id);
-    if (userIds.length > 0) await supabase.from('users').update({ role: 'affiliate' }).in('id', userIds);
+    if (userIds.length > 0) {
+      // Preserve admin/staff roles when approving an affiliate profile.
+      await supabase.from('users').update({ role: 'affiliate' }).in('id', userIds).eq('role', 'user');
+    }
   }
   await AdminLogService.log(req.user!.id, `bulk_${action}_affiliate`, 'affiliates', ids.join(','), { count: ids.length });
   return sendSuccess(res, { message: `${ids.length} affiliate(s) ${action}d` });
@@ -743,7 +746,8 @@ router.post('/affiliates/:id/approve', async (req, res) => {
   await supabase.from('affiliates').update({ approval_status: 'approved' }).eq('id', id);
   const { data: aff } = await supabase.from('affiliates').select('user_id').eq('id', id).single();
   if (aff) {
-    await supabase.from('users').update({ role: 'affiliate' }).eq('id', aff.user_id);
+    // An affiliate approval must not overwrite a higher-privilege staff role.
+    await supabase.from('users').update({ role: 'affiliate' }).eq('id', aff.user_id).eq('role', 'user');
   }
   await AdminLogService.log(req.user!.id, 'approve_affiliate', 'affiliates', id, {});
   return sendSuccess(res, { message: 'Affiliate approved' });

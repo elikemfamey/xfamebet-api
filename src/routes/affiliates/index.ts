@@ -42,7 +42,11 @@ router.post('/register', validateBody(registerSchema), async (req, res) => {
     approval_status: 'pending',
   }).select().single();
 
-  await supabase.from('users').update({ role: 'affiliate' }).eq('id', req.user!.id);
+  // Affiliate participation is a capability, not a privilege level. Never
+  // demote staff accounts just because they also create an affiliate profile.
+  if (!['admin', 'super_admin', 'fraud_analyst'].includes(req.user!.role)) {
+    await supabase.from('users').update({ role: 'affiliate' }).eq('id', req.user!.id);
+  }
 
   return sendSuccess(res, data, 201);
 });

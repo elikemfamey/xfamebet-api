@@ -46,7 +46,10 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
       return sendError(res, 'Account suspended', 403);
     }
 
-    req.user = { id: payload.userId, role: payload.role, sessionId: payload.sessionId };
+    // The database is the authority for current permissions. Using the role
+    // embedded in the access token leaves stale privileges active after a
+    // role change (and made affiliate enrollment particularly error-prone).
+    req.user = { id: payload.userId, role: user.role, sessionId: payload.sessionId };
     next();
   } catch {
     return sendError(res, 'Invalid token', 401);
