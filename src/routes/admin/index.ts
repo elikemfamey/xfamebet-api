@@ -565,7 +565,8 @@ router.get('/affiliates/:id', async (req, res) => {
   }
 
   const user = aff.users as unknown as { id: string; username: string; email?: string; phone?: string; referral_code: string };
-  const baseUrl = ((process.env.FRONTEND_URL ?? 'https://www.primewin.site') as string).split(',')[0].trim();
+  const configuredUrl = ((process.env.FRONTEND_URL ?? 'https://www.primewin.site') as string).split(',')[0].trim();
+  const baseUrl = /xfamebet/i.test(configuredUrl) ? 'https://www.primewin.site' : configuredUrl;
   const totalPaidOut = (aff.total_earnings ?? 0) - (aff.withdrawal_balance ?? 0);
   const avgDepositPerUser = depositedUsers > 0 ? totalDeposits / depositedUsers : 0;
 
