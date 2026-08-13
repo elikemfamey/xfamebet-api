@@ -464,6 +464,10 @@ router.post('/mobile-numbers/:id/default', authenticate, asyncHandler(async (req
 router.post('/payout-settings', authenticate, validateBody(payoutSettingsSchema), asyncHandler(async (req, res) => {
   const { method_type, account_name, account_number, bank_name, is_default } = req.body;
 
+  if (method_type.startsWith('momo_')) {
+    return sendError(res, 'Verify mobile money numbers using the mobile-number verification flow before saving them', 400);
+  }
+
   if (is_default) {
     await supabase
       .from('payment_methods')
