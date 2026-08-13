@@ -38,12 +38,18 @@ const registerPhoneSchema = z.object({
   promo_code: z.string().optional(),
 });
 
+// Optional profile fields arrive from browser inputs. Treat whitespace-only
+// values as omitted, then validate trimmed values with useful errors.
+const optionalText = (schema: z.ZodTypeAny) => z.preprocess(
+  value => typeof value === 'string' ? (value.trim() || undefined) : value,
+  schema.optional(),
+);
 const completeProfileSchema = z.object({
-  username: z.string().min(3).max(30).regex(/^[a-zA-Z0-9_]+$/).optional(),
-  email: z.string().email().optional(),
-  full_name: z.string().max(100).optional(),
-  date_of_birth: z.string().optional(),
-  address: z.string().max(255).optional(),
+  username: optionalText(z.string().min(3, 'Username must be at least 3 characters').max(30, 'Username must be 30 characters or fewer').regex(/^[a-zA-Z0-9_]+$/, 'Username can use letters, numbers, and underscores only')),
+  email: optionalText(z.string().email('Enter a valid email address')),
+  full_name: optionalText(z.string().max(100, 'Full name must be 100 characters or fewer')),
+  date_of_birth: optionalText(z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Choose a valid date of birth')),
+  address: optionalText(z.string().max(255, 'Address must be 255 characters or fewer')),
 });
 
 const loginSchema = z.object({
