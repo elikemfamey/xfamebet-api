@@ -22,9 +22,7 @@ const status = (score: LiveScore) => score.status_short === 'HT' ? 'HT' : score.
 function h2h(rows: OddsRow[]) { return { home: rows.find(r => r.market_type === 'match_winner' && r.selection === 'home')?.odds_value, draw: rows.find(r => r.market_type === 'match_winner' && r.selection === 'draw')?.odds_value, away: rows.find(r => r.market_type === 'match_winner' && r.selection === 'away')?.odds_value }; }
 function scoreFor(entry: OddsApiScoreEntry, side: 'home' | 'away') { const team = side === 'home' ? entry.home_team : entry.away_team; return entry.scores?.find(s => s.name === team)?.score ?? null; }
 
-// A display-only fallback when a live provider is unavailable. It uses a
-// neutral Poisson remaining-goals estimate; markets remain suspended and it
-// never creates a price that can be placed in a bet slip.
+// Fallback live estimate for the headline market when the full catalogue is unavailable.
 function liveEstimate(homeScore: number, awayScore: number, minute: number): [number, number, number] {
   const remaining = Math.max(0, 90 - Math.min(90, minute));
   const lambda = 2.55 * remaining / 90 / 2;
@@ -70,7 +68,7 @@ export async function buildLiveFeed(sport?: string): Promise<LiveFeedMatch[]> {
     const estimatedMarkets = locked ? estimateFootballMarkets({ eventId, home: score.home_team, away: score.away_team, league: score.league, startsAt: score.starts_at ?? new Date().toISOString(), isLive: true, homeScore: score.home_score, awayScore: score.away_score, minute: score.minute }) : undefined;
     const headline = estimatedMarkets?.filter(row => row.market_type === 'match_winner');
     const estimate = headline ? [Number(headline.find(row => row.selection === 'home')?.odds_value), Number(headline.find(row => row.selection === 'draw')?.odds_value), Number(headline.find(row => row.selection === 'away')?.odds_value)] as [number, number, number] : locked ? liveEstimate(score.home_score, score.away_score, score.minute) : null;
-    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: locked ? estimate! : [prices.home!, prices.draw ?? '-', prices.away!], oddsLocked: locked, oddsStatus: locked ? 'suspended' : 'active', oddsLockReason: locked ? 'Estimated prices — betting is suspended until a verified provider price is available.' : undefined, oddsEstimated: locked, estimatedMarkets, markets: locked ? 0 : selectedRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null, apiFootballFixtureId: score.fixture_id, competitionKey: score.competition_key ?? `api-football:${score.league}`, country: score.country ?? null });
+    result.push({ eventId, oddsEventId: eventId, league: score.league, sport: 'football', isLive: true, status: status(score), home: { name: score.home_team, logoUrl: score.home_logo }, away: { name: score.away_team, logoUrl: score.away_logo }, homeScore: String(score.home_score), awayScore: String(score.away_score), odds: locked ? estimate! : [prices.home!, prices.draw ?? '-', prices.away!], oddsLocked: false, oddsStatus: 'active', oddsEstimated: locked, estimatedMarkets, markets: locked ? (estimatedMarkets?.length ?? 3) : selectedRows.length, sportKey: 'football', kickedOffAt: score.starts_at ?? null, apiFootballFixtureId: score.fixture_id, competitionKey: score.competition_key ?? `api-football:${score.league}`, country: score.country ?? null });
   }
 
   // Other sports require a score-bearing Odds API entry; football is deliberately excluded above.

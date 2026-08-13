@@ -27,6 +27,13 @@ const CS_STANDARD = [
   '4-0','0-4','4-1','1-4','4-2','2-4',
 ];
 
+/** Estimate markets that can be resolved from an official final score. */
+export const BETTABLE_ESTIMATED_MARKETS = new Set([
+  'match_winner', 'double_chance', 'over_under', 'btts', 'total_goals_exact',
+  'clean_sheet_home', 'clean_sheet_away', 'anytime_score_home',
+  'anytime_score_away', 'correct_score',
+]);
+
 // ── Math helpers ──────────────────────────────────────────────────────────────
 
 /** Poisson PMF — iterative to avoid large factorial values */
@@ -376,7 +383,7 @@ export type FootballEstimateInput = {
 
 /**
  * Produces the same complete market catalogue used by virtual football, but
- * never persists it. Consumers must present these rows as suspended estimates.
+ * never persists it. Estimates remain available while provider prices are unavailable.
  */
 export function estimateFootballMarkets(input: FootballEstimateInput): Array<Record<string, unknown>> {
   const hash = (value: string) => {
@@ -395,6 +402,10 @@ export function estimateFootballMarkets(input: FootballEstimateInput): Array<Rec
     phase: !input.isLive || minute <= 45 ? 'first_half' : 'second_half',
     firstScorerTeam: scoreA > 0 ? 'home' : scoreB > 0 ? 'away' : null,
   }) as Array<Record<string, unknown>>;
-  const lockReason = 'Estimated prices — betting is suspended until a verified provider price is available.';
-  return rows.map(row => ({ ...row, status: 'suspended', lock_reason: lockReason, estimated: true }));
+  return rows.map(row => ({
+    ...row,
+    status: BETTABLE_ESTIMATED_MARKETS.has(String(row.market_type)) ? 'active' : 'suspended',
+    lock_reason: BETTABLE_ESTIMATED_MARKETS.has(String(row.market_type)) ? null : 'This estimated market requires event data that is not available for automatic settlement.',
+    estimated: true,
+  }));
 }

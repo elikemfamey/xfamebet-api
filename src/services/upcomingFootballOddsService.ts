@@ -12,7 +12,7 @@ const HEALTH_KEY = 'upcoming_football:provider_health';
 export const UPCOMING_FIXTURE_WINDOW_DAYS = 30;
 // API-Football publishes pre-match odds only up to 14 days before kickoff.
 // The fixture catalogue remains one month wide; later fixtures are visible
-// with suspended markets until verified prices become available.
+// with estimated markets until verified prices become available.
 const UPCOMING_ODDS_WINDOW_DAYS = 14;
 
 type Mapping = { canonical_event_id: string; sportmonks_fixture_id?: number | null; api_football_fixture_id?: number | null; odds_api_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_key: string; competition_name: string; country_name?: string | null };
@@ -72,8 +72,8 @@ function apiFootballOdds(event: any) {
 
 async function ingestApiFootballUpcomingOdds() {
   if (!env.API_FOOTBALL_KEY) throw new Error('API_FOOTBALL_KEY not configured');
-  // Fixtures and prices are deliberately separate: fixtures remain visible
-  // with suspended markets even when an upcoming match has no listed price.
+  // Fixtures and prices are deliberately separate: fixtures remain available
+  // with estimated markets even when an upcoming match has no listed price.
   const dates = Array.from({ length: UPCOMING_FIXTURE_WINDOW_DAYS }, (_, index) =>
     new Date(Date.now() + index * 86_400_000).toISOString().slice(0, 10));
   const fixtureResponses = await Promise.all(dates.map(date => axios.get('https://v3.football.api-sports.io/fixtures', {
@@ -183,7 +183,7 @@ export async function getUpcomingFootballFixtures(liveFixtureIds: number[] = [])
     const odds = primaryFresh ? apiOdds : fallbackFresh ? fallbackOdds : estimatedMarkets!.filter(row => row.market_type === 'match_winner');
     const fresh = primaryFresh || fallbackFresh;
     return { eventId: mapping.canonical_event_id, apiFootballFixtureId: mapping.api_football_fixture_id ?? null, home: mapping.home_team, away: mapping.away_team, startsAt: mapping.starts_at, sport: 'football', competitionKey: mapping.competition_key, competitionName: mapping.competition_name, country: mapping.country_name ?? null,
-      oddsStatus: fresh ? 'active' : 'suspended', oddsLockReason: fresh ? undefined : String(odds[0]?.lock_reason ?? 'Estimated prices — betting is suspended until a verified provider price is available.'), odds, oddsEstimated: estimated, estimatedMarkets };
+      oddsStatus: 'active', oddsLockReason: undefined, odds, oddsEstimated: estimated, estimatedMarkets };
   });
   if (canonicalFixtures.length) return canonicalFixtures;
 

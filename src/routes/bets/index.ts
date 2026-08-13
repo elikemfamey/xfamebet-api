@@ -11,6 +11,9 @@ import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { betLimiter } from '../../middleware/rateLimiter';
 import { broadcastBetWon } from '../../socket';
+import { estimateFootballMarkets } from '../../services/liveOddsRegulator';
+import { getCachedLiveScores } from '../../services/liveScoreService';
+import { resolveCanonicalEventId } from '../../services/liveFixtureIdentityService';
 
 const router = Router();
 
@@ -53,6 +56,31 @@ const placeBetSchema = z.object({
 
 type PlaceBetBody = z.infer<typeof placeBetSchema>;
 
+type Selection = z.infer<typeof selectionSchema>;
+type CurrentOdds = { odds_value: number; status: string; is_live: boolean; provider_updated_at?: string | null; updated_at?: string | null; source: string };
+
+/**
+ * Estimates are intentionally computed rather than written to odds_feed. On
+ * placement, recreate the current estimate from the authoritative fixture
+ * metadata so a client cannot invent a selection or price.
+ */
+async function currentEstimatedOdds(selection: Selection): Promise<CurrentOdds | null> {
+  const scores = await getCachedLiveScores();
+  for (const score of scores) {
+    if (await resolveCanonicalEventId(score) !== selection.event_id) continue;
+    const rows = estimateFootballMarkets({ eventId: selection.event_id, home: score.home_team, away: score.away_team, league: score.league, startsAt: score.starts_at ?? new Date().toISOString(), isLive: true, homeScore: score.home_score, awayScore: score.away_score, minute: score.minute });
+    const row = rows.find(item => item.market_type === selection.market_type && item.selection === selection.selection);
+    return row ? { odds_value: Number(row.odds_value), status: 'active', is_live: true, source: 'estimate' } : null;
+  }
+
+  const { data: fixture } = await supabase.from('upcoming_football_fixture_mappings')
+    .select('home_team,away_team,competition_name,starts_at').eq('canonical_event_id', selection.event_id).maybeSingle();
+  if (!fixture) return null;
+  const rows = estimateFootballMarkets({ eventId: selection.event_id, home: fixture.home_team, away: fixture.away_team, league: fixture.competition_name, startsAt: fixture.starts_at, isLive: false });
+  const row = rows.find(item => item.market_type === selection.market_type && item.selection === selection.selection);
+  return row ? { odds_value: Number(row.odds_value), status: 'active', is_live: false, source: 'estimate' } : null;
+}
+
 // POST /bets/place
 router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res) => {
   const { stake, bet_type, use_bonus, selections } = req.body as PlaceBetBody;
@@ -70,17 +98,20 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
 
   // Validate odds still active
   for (const sel of selections) {
-    const { data: oddsData } = await supabase
+    const { data: storedOdds } = await supabase
       .from('odds_feed').select('odds_value, status, is_live, provider_updated_at, updated_at, source')
       .eq('event_id', sel.event_id).eq('market_type', sel.market_type)
       .eq('selection', sel.selection).single();
+
+    const estimatedOdds = (!storedOdds || storedOdds.status !== 'active') ? await currentEstimatedOdds(sel) : null;
+    const oddsData = (storedOdds?.status === 'active' ? storedOdds : estimatedOdds) as CurrentOdds | null;
 
     if (!oddsData || oddsData.status !== 'active') {
       return sendError(res, `Odds for ${sel.event_name} - ${sel.selection} are no longer available`, 400);
     }
 
     // A canonical live event may only be accepted from a fresh verified in-play snapshot.
-    if (sel.event_id.startsWith('live:football:')) {
+    if (sel.event_id.startsWith('live:football:') && oddsData.source !== 'estimate') {
       const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
       const freshness = oddsData.source === 'odds_api_io_live' ? 4 * 60_000 : 45_000;
       const verifiedSource = oddsData.source === 'api_football_live' || oddsData.source === 'odds_api_io_live';
@@ -92,7 +123,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
 
     // Upcoming canonical football prices are valid for one hour only. This is
     // intentionally separate from live freshness and excludes legacy events.
-    if (sel.event_id.startsWith('upcoming:football:')) {
+    if (sel.event_id.startsWith('upcoming:football:') && oddsData.source !== 'estimate') {
       const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
       const freshness = oddsData.source === 'odds_api_io_upcoming' ? 24 * 60 * 60_000 : 60 * 60_000;
       const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > freshness;
