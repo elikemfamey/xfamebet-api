@@ -73,7 +73,7 @@ const ngBankSchema = z.object({
   bank_name: z.string(),
   account_name: z.string(),
   reference: z.string(),
-  screenshot_url: z.string().optional(),
+  screenshot_url: z.string().min(1, 'A bank-transfer receipt is required'),
 });
 
 const usdtSchema = z.object({
