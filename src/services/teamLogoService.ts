@@ -129,9 +129,35 @@ export function persistFixtureLogos(
   fixtures: Array<{ teamName: string; logoUrl: string | null; source?: LogoSource }>,
   defaultSource: LogoSource = 'api_football',
 ): void {
+  // A live-score refresh can contain hundreds of teams. Do not turn that into
+  // hundreds of concurrent HTTP requests to Supabase: the resulting socket and
+  // CPU burst can make the API miss its own health checks on small instances.
+  const unique = new Map<string, { team_name: string; logo_url: string; source: LogoSource; updated_at: string }>();
+  const updatedAt = new Date().toISOString();
   for (const { teamName, logoUrl, source } of fixtures) {
-    if (teamName && logoUrl) {
-      dbUpsert(teamName, logoUrl, source ?? defaultSource).catch(() => {});
-    }
+    const name = teamName?.trim();
+    if (!name || !logoUrl) continue;
+    unique.set(name.toLowerCase(), {
+      team_name: name,
+      logo_url: logoUrl,
+      source: source ?? defaultSource,
+      updated_at: updatedAt,
+    });
   }
+
+  const rows = [...unique.values()];
+  if (rows.length === 0) return;
+
+  void (async () => {
+    // Keep each request comfortably sized and run batches sequentially to
+    // protect the API's event loop and Supabase connection pool.
+    for (let index = 0; index < rows.length; index += 100) {
+      const { error } = await supabase
+        .from('team_logos')
+        .upsert(rows.slice(index, index + 100), { onConflict: 'team_name' });
+      if (error) logger.warn('[TeamLogo] Bulk fixture-logo upsert failed', { error: error.message });
+    }
+  })().catch(error => logger.warn('[TeamLogo] Bulk fixture-logo persistence failed', {
+    error: error instanceof Error ? error.message : String(error),
+  }));
 }
