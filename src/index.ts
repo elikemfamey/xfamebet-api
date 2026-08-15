@@ -35,6 +35,13 @@ const server = http.createServer(app);
 // Trust Render's reverse proxy so express-rate-limit can read X-Forwarded-For correctly
 app.set('trust proxy', 1);
 
+// Keep the platform probe independent of Redis, rate limiting, and the rest
+// of the application middleware. A temporary dependency outage must not make
+// a running HTTP server look unhealthy to Render.
+app.get('/health', (_req, res) => {
+  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), service: 'primewin-api' });
+});
+
 // Security
 app.use(helmet({ contentSecurityPolicy: false }));
 const allowedOrigins = [
@@ -64,11 +71,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 app.use(generalLimiter);
 
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), service: 'primewin-api' });
-});
-
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/wallet', walletRoutes);
@@ -91,11 +93,11 @@ app.use(errorHandler);
 // Init Socket.IO
 initSocketIO(server);
 
-// Start background workers
-startWorkers();
-
 server.listen(env.PORT, () => {
   logger.info(`Primewin API running on port ${env.PORT} [${env.NODE_ENV}]`);
+  // The HTTP listener is ready before external I/O workers start, so platform
+  // health checks remain responsive during provider or Redis recovery.
+  startWorkers();
 });
 
 export default app;
