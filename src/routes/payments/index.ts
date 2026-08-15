@@ -194,7 +194,6 @@ router.post('/moolre/:reference/verify', authenticate, paymentLimiter, asyncHand
   const result = await MoolreService.verifyAndCredit(deposit);
   if (result && !result.already_completed && result.user_id) {
     await NotificationService.send(result.user_id, 'deposit_approved', 'Deposit Approved', `Your Moolre deposit of GHS ${result.amount} has been credited.`);
-    AffiliateService.creditCpaCommission(result.user_id, Number(result.amount), 'GHS').catch(() => {});
     return sendSuccess(res, { status: 'completed', credited: true });
   }
   return sendSuccess(res, { status: 'pending', credited: false, message: 'Payment is still being confirmed by Moolre.' });
@@ -244,7 +243,6 @@ router.post('/moolre/webhook', asyncHandler(async (req, res) => {
       const result = await MoolreService.verifyAndCredit(deposit);
       if (result && !result.already_completed && result.user_id) {
         await NotificationService.send(result.user_id, 'deposit_approved', 'Deposit Approved', `Your Moolre deposit of GHS ${result.amount} has been credited.`);
-        AffiliateService.creditCpaCommission(result.user_id, Number(result.amount), 'GHS').catch(() => {});
       }
     }
   }
@@ -680,8 +678,6 @@ router.post('/admin/deposits/:id/approve', authenticate, requireAdmin, validateB
 
   await WalletService.credit(deposit.user_id, amountToCredit, 'deposit', deposit.payment_provider, undefined, `${deposit.payment_provider} deposit approved`, { usd_rate: usdRate, usd_equivalent: Number((amountToCredit * usdRate).toFixed(2)) });
   await NotificationService.send(deposit.user_id, 'deposit_approved', 'Deposit Approved', `Your deposit has been approved. ${walletCurrency} ${amountToCredit} has been credited to your account.`);
-  AffiliateService.creditCpaCommission(deposit.user_id, amountToCredit, walletCurrency).catch(() => {});
-
   await AdminLogService.log(req.user!.id, 'approve_deposit', 'deposit_request', id, { amount: amountToCredit, credited_amount, provider: deposit.payment_provider });
   await supabase.from('payment_audit_logs').insert({ entity_type: 'deposit_request', entity_id: id, action: 'approve', admin_id: req.user!.id, previous_status: 'pending', new_status: 'approved', amount: amountToCredit, notes });
 
