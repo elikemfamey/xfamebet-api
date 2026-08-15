@@ -91,6 +91,9 @@ const withdrawSchema = z.object({
 const approveRejectSchema = z.object({
   notes: z.string().optional(),
 });
+const rejectWithdrawalSchema = z.object({
+  notes: z.string().trim().min(1, 'A reason is required when declining a withdrawal'),
+});
 
 // Extended schema for deposit approval — allows admin to specify the local-currency
 // equivalent when approving a USDT deposit for an NGN or GHS wallet.
@@ -859,7 +862,7 @@ router.post('/admin/withdrawals/:id/complete', authenticate, requireAdmin, valid
 }));
 
 // POST /payments/admin/withdrawals/:id/reject
-router.post('/admin/withdrawals/:id/reject', authenticate, requireAdmin, validateBody(approveRejectSchema), asyncHandler(async (req, res) => {
+router.post('/admin/withdrawals/:id/reject', authenticate, requireAdmin, validateBody(rejectWithdrawalSchema), asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { notes } = req.body;
 
@@ -882,7 +885,7 @@ router.post('/admin/withdrawals/:id/reject', authenticate, requireAdmin, validat
     // Regular withdrawal: refund the wallet that was debited at request time
     await WalletService.credit(withdrawal.user_id, withdrawal.amount, 'refund', undefined, undefined, 'Withdrawal rejected - funds returned');
   }
-  await NotificationService.send(withdrawal.user_id, 'withdrawal_rejected', 'Withdrawal Rejected', `Your withdrawal was rejected. ${notes ?? ''} Funds returned to your account.`);
+  await NotificationService.send(withdrawal.user_id, 'withdrawal_rejected', 'Withdrawal Declined', `Your withdrawal was declined. Reason: ${notes}. Funds have been returned to your account.`);
   await AdminLogService.log(req.user!.id, 'reject_withdrawal', 'withdrawal_request', id, { notes });
 
   return sendSuccess(res, { message: 'Withdrawal rejected and funds returned' });
