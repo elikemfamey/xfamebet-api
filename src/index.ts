@@ -35,10 +35,10 @@ const server = http.createServer(app);
 // Trust Render's reverse proxy so express-rate-limit can read X-Forwarded-For correctly
 app.set('trust proxy', 1);
 
-// Keep the platform probe independent of Redis, rate limiting, and the rest
-// of the application middleware. A temporary dependency outage must not make
-// a running HTTP server look unhealthy to Render.
-app.get('/health', (_req, res) => {
+// Keep platform probes independent of Redis, rate limiting, and the rest of
+// the application middleware. Render also probes `/` with HEAD during startup;
+// Express serves that through this GET handler without a response body.
+app.get(['/', '/health'], (_req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString(), service: 'primewin-api' });
 });
 
