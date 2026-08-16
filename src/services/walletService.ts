@@ -2,6 +2,7 @@ import { supabase } from '../config/supabase';
 import { redis, REDIS_KEYS } from '../config/redis';
 import { TransactionType, PaymentProvider } from '../types';
 import { logger } from '../utils/logger';
+import { broadcastWalletUpdate } from '../socket';
 
 export class WalletService {
   static async getBalance(userId: string) {
@@ -53,6 +54,7 @@ export class WalletService {
         .eq('id', wallet.id);
       if (updateErr) throw new Error('Wallet update failed');
 
+      broadcastWalletUpdate(userId, wallet.balance + amount);
       return { success: true, new_balance: wallet.balance + amount };
     } finally {
       await redis.del(lockKey);
@@ -117,6 +119,7 @@ export class WalletService {
         .eq('id', wallet.id);
       if (updateErr) throw new Error('Wallet update failed');
 
+      broadcastWalletUpdate(userId, wallet.balance - amount);
       return { success: true, new_balance: wallet.balance - amount };
     } finally {
       await redis.del(lockKey);
