@@ -26,6 +26,7 @@ import teamLogoRoutes from './routes/teams';
 import crashRoutes from './routes/crash';
 import countryRoutes from './routes/countries';
 import gameRoutes from './routes/games';
+import notificationRoutes from './routes/notifications';
 
 validateEnv();
 
@@ -85,6 +86,7 @@ app.use('/api/fraud', fraudRoutes);
 app.use('/api/crash', crashRoutes);
 app.use('/api/countries', countryRoutes);
 app.use('/api/games', gameRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 // 404 and error handling
 app.use(notFoundHandler);
