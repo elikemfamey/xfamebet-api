@@ -275,11 +275,12 @@ async function settleBets(matchId: string, result: string, scoreA: number, score
       metadata: { finalScores: { [eventId]: finalScore } },
     }).eq('id', bet.id);
 
-    if (betWon) {
+      if (betWon) {
       try {
         const { new_balance } = await WalletService.credit(bet.user_id, payout, 'bet_win', undefined, undefined, `Bet won - ${bet.id}`);
         broadcastWalletUpdate(bet.user_id, new_balance);
-        broadcastBetWon(bet.user_id, { betId: bet.id, amount: payout, currency: 'GHS' });
+        const { data: wallet } = await supabase.from('wallets').select('currency').eq('user_id', bet.user_id).single();
+        broadcastBetWon(bet.user_id, { betId: bet.id, amount: payout, currency: wallet?.currency ?? 'USD' });
       } catch (e) {
         logger.error('Failed to credit win payout', { betId: bet.id, error: e });
       }

@@ -212,16 +212,17 @@ export async function settlePendingBets(): Promise<void> {
           bet.user_id, bet.potential_payout, 'bet_win',
           undefined, undefined, `Bet won - auto-settled`,
         );
-        await NotificationService.send(
-          bet.user_id, 'bet_won', 'Bet Won!',
-          `Congratulations! You won GHS ${bet.potential_payout}`,
-        );
         const { data: wallet } = await supabase
           .from('wallets').select('currency').eq('user_id', bet.user_id).single();
+        const currency = wallet?.currency ?? 'USD';
+        await NotificationService.send(
+          bet.user_id, 'bet_won', 'Bet Won!',
+          `Congratulations! You won ${currency} ${bet.potential_payout}`,
+        );
         broadcastBetWon(bet.user_id, {
           betId: bet.id,
           amount: bet.potential_payout,
-          currency: wallet?.currency ?? 'GHS',
+          currency,
           shareCode: bet.share_code ?? undefined,
         });
       } else {

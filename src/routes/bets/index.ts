@@ -299,15 +299,16 @@ router.post('/admin/settle/:id', authenticate, requireAdmin, async (req, res) =>
 
   if (newStatus === 'won') {
     await WalletService.credit(bet.user_id, bet.potential_payout, 'bet_win', undefined, undefined, `Bet won - ${id}`);
-    await NotificationService.send(bet.user_id, 'bet_won', 'Bet Won!', `Congratulations! You won GHS ${bet.potential_payout}`);
     await supabase.from('bets').update({ payout: bet.potential_payout }).eq('id', id);
 
     // Fetch wallet currency and share code for the win celebration push
     const { data: wallet } = await supabase.from('wallets').select('currency').eq('user_id', bet.user_id).single();
+    const currency = wallet?.currency ?? 'USD';
+    await NotificationService.send(bet.user_id, 'bet_won', 'Bet Won!', `Congratulations! You won ${currency} ${bet.potential_payout}`);
     broadcastBetWon(bet.user_id, {
       betId: id,
       amount: bet.potential_payout,
-      currency: wallet?.currency ?? 'GHS',
+      currency,
       shareCode: bet.share_code ?? undefined,
     });
   } else if (newStatus === 'void') {
