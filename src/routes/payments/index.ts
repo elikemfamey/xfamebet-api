@@ -15,6 +15,7 @@ import { MoolreApiError, MoolreService } from '../../services/moolreService';
 import { redis } from '../../config/redis';
 import { sendOtpSms } from '../../services/smsService';
 import { generateOtp } from '../../utils/crypto';
+import { logger } from '../../utils/logger';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -39,6 +40,7 @@ const moolreMobileMoneySchema = z.object({
   network: z.enum(['mtn', 'telecel', 'airteltigo']),
   phone_number: z.string().regex(/^0\d{9}$/, 'Use a 10-digit Ghana phone number beginning with 0'),
   payment_method_id: z.string().uuid(),
+  retry_of: z.string().min(1).max(100).optional(),
 });
 const moolreOtpSchema = z.object({
   reference: z.string().min(1),
@@ -136,22 +138,38 @@ async function getEligibleMoolreWallet(userId: string) {
 // POST /payments/moolre/mobile-money -- sends a MoMo approval prompt to the player's phone.
 router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(moolreMobileMoneySchema), asyncHandler(async (req, res) => {
   if (!MoolreService.isConfigured()) return sendError(res, `Moolre is not configured. Missing: ${MoolreService.missingConfiguration().join(', ')}`, 503);
-  const { amount, network, phone_number, payment_method_id } = req.body;
+  const { amount, network, phone_number, payment_method_id, retry_of } = req.body;
   const chargeAmount = Math.max(amount, 300);
   try { await getEligibleMoolreWallet(req.user!.id); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
   try { await selectedVerifiedMomoMethod(req.user!.id, payment_method_id, phone_number, network); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
+  if (retry_of) {
+    const { data: original } = await supabase.from('deposit_requests').select('id, metadata').eq('user_id', req.user!.id)
+      .eq('payment_provider', 'moolre').eq('reference', retry_of).single();
+    if (!original || (original.metadata as Record<string, unknown> | null)?.retry_of) {
+      return sendError(res, 'Invalid Moolre payment retry', 400);
+    }
+    const { count } = await supabase.from('deposit_requests').select('id', { count: 'exact', head: true })
+      .eq('user_id', req.user!.id).eq('payment_provider', 'moolre').contains('metadata', { retry_of });
+    if ((count ?? 0) > 0) return sendError(res, 'A replacement Moolre payment request already exists', 409);
+  }
   const reference = `MLR-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const channel = MOOLRE_CHANNELS[network as keyof typeof MOOLRE_CHANNELS];
+  const retryAttempt = retry_of ? 2 : 1;
+  const requestMetadata = {
+    network, channel, payment_mode: 'mobile_money_prompt', retry_attempt: retryAttempt,
+    ...(retry_of ? { retry_of } : {}),
+  };
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id, amount: chargeAmount, currency: 'GHS', payment_provider: 'moolre', reference, account_number: phone_number,
-    status: 'pending', metadata: { network, channel, payment_mode: 'mobile_money_prompt' },
+    status: 'pending', metadata: requestMetadata,
   });
   if (error) return sendError(res, 'Could not create deposit request', 500);
   try {
     const result = await MoolreService.requestMobileMoneyPayment({ amount: chargeAmount, reference, phone: phone_number, channel });
-    await supabase.from('deposit_requests').update({ metadata: { network, channel, payment_mode: 'mobile_money_prompt', moolre_code: result.code } }).eq('reference', reference);
+    await supabase.from('deposit_requests').update({ metadata: { ...requestMetadata, moolre_code: result.code } }).eq('reference', reference);
+    logger.info('Moolre mobile-money response', { reference, attempt: retryAttempt, code: result.code, message: result.message });
     return sendSuccess(res, {
       reference, code: result.code, otp_required: result.code === 'TP14', prompt_sent: result.code === 'TR099',
       message: result.message ?? (result.code === 'TR099' ? 'Payment prompt sent.' : 'Moolre requires additional verification.'),
@@ -180,6 +198,7 @@ router.post('/moolre/mobile-money/otp', authenticate, paymentLimiter, validateBo
     if (result.code !== 'TR099') {
       result = await MoolreService.requestMobileMoneyPayment({ amount: deposit.amount, reference, phone: deposit.account_number, channel });
     }
+    logger.info('Moolre mobile-money OTP response', { reference, attempt: metadata.retry_attempt ?? 1, code: result.code, message: result.message });
     return sendSuccess(res, {
       reference, code: result.code, otp_required: result.code === 'TP14', prompt_sent: result.code === 'TR099',
       message: result.message ?? (result.code === 'TR099' ? 'Payment prompt sent.' : 'Moolre did not yet initiate the payment prompt.'),
