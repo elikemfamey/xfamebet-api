@@ -174,9 +174,10 @@ router.post('/moolre/mobile-money/otp', authenticate, paymentLimiter, validateBo
   if (!channel || !deposit.account_number) return sendError(res, 'Moolre payment details are incomplete', 400);
   try {
     let result = await MoolreService.requestMobileMoneyPayment({ amount: deposit.amount, reference, phone: deposit.account_number, channel, otpCode: otp_code });
-    // Moolre may first confirm the number, then require the same payment request
-    // to be made again before it creates the actual MoMo prompt.
-    if (result.code !== 'TR099' && /phone\s*no\.?\s*verification\s*successful/i.test(result.message ?? '')) {
+    // TP14's documented flow requires a fresh payment request after OTP verification.
+    // Moolre's verification-success text is not stable, so retry every non-prompt
+    // response once; an invalid OTP simply returns TP14 again without charging.
+    if (result.code !== 'TR099') {
       result = await MoolreService.requestMobileMoneyPayment({ amount: deposit.amount, reference, phone: deposit.account_number, channel });
     }
     return sendSuccess(res, {
