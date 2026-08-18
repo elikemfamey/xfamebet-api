@@ -145,9 +145,9 @@ router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(m
   try { await selectedVerifiedMomoMethod(req.user!.id, payment_method_id, phone_number, network); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
   if (retry_of) {
-    const { data: original } = await supabase.from('deposit_requests').select('id, metadata').eq('user_id', req.user!.id)
+    const { data: original } = await supabase.from('deposit_requests').select('id, status, metadata').eq('user_id', req.user!.id)
       .eq('payment_provider', 'moolre').eq('reference', retry_of).single();
-    if (!original || (original.metadata as Record<string, unknown> | null)?.retry_of) {
+    if (!original || original.status !== 'pending' || (original.metadata as Record<string, unknown> | null)?.retry_of) {
       return sendError(res, 'Invalid Moolre payment retry', 400);
     }
     const { count } = await supabase.from('deposit_requests').select('id', { count: 'exact', head: true })
