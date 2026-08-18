@@ -125,9 +125,16 @@ router.post('/users/:id/unfreeze-wallet', async (req, res) => {
 
 // POST /admin/users/:id/freeze-withdrawals
 router.post('/users/:id/freeze-withdrawals', async (req, res) => {
-  await supabase.from('wallets').update({ withdrawal_frozen: true }).eq('user_id', req.params.id);
+  await supabase.from('wallets').update({ withdrawal_frozen: true, withdrawal_deposit_override: false }).eq('user_id', req.params.id);
   await AdminLogService.log(req.user!.id, 'freeze_withdrawals', 'users', req.params.id, {});
   return sendSuccess(res, { message: 'Withdrawals frozen' });
+});
+
+// POST /admin/users/:id/allow-withdrawals -- persistent exemption from the deposit threshold.
+router.post('/users/:id/allow-withdrawals', async (req, res) => {
+  await supabase.from('wallets').update({ withdrawal_frozen: false, withdrawal_deposit_lock: false, withdrawal_deposit_override: true }).eq('user_id', req.params.id);
+  await AdminLogService.log(req.user!.id, 'allow_withdrawals', 'users', req.params.id, { deposit_requirement_override: true });
+  return sendSuccess(res, { message: 'Withdrawals allowed until an admin freezes them again' });
 });
 
 // POST /admin/users/:id/revoke-sessions
