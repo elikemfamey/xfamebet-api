@@ -27,6 +27,8 @@ import crashRoutes from './routes/crash';
 import countryRoutes from './routes/countries';
 import gameRoutes from './routes/games';
 import notificationRoutes from './routes/notifications';
+import supportRoutes from './routes/support';
+import adminSupportRoutes from './routes/admin/support';
 
 validateEnv();
 
@@ -87,6 +89,8 @@ app.use('/api/crash', crashRoutes);
 app.use('/api/countries', countryRoutes);
 app.use('/api/games', gameRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/support', supportRoutes);
+app.use('/api/admin/support', adminSupportRoutes);
 
 // 404 and error handling
 app.use(notFoundHandler);
