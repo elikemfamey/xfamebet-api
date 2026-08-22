@@ -77,7 +77,7 @@ const ngBankSchema = z.object({
 });
 
 const usdtSchema = z.object({
-  amount_usd: z.number().min(1),
+  amount_usd: z.number().min(30, 'Minimum USDT deposit is 30 USDT'),
   amount_ngn: z.number().optional(),
   tx_hash: z.string().min(10),
 });
