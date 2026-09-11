@@ -30,6 +30,34 @@ const router = Router();
 // ---------------------------------------------------------------------------
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
+const GLOBAL_PLATFORM_CONTROLS_ID = '00000000-0000-0000-0000-000000000001';
+const DEFAULT_WITHDRAWAL_LOCK_MESSAGE = 'Withdrawals are temporarily unavailable. Please try again later.';
+
+type WithdrawalControl = {
+  withdrawals_locked: boolean;
+  withdrawals_lock_reason: string | null;
+  updated_by: string | null;
+  updated_at: string;
+};
+
+async function getWithdrawalControl(): Promise<WithdrawalControl> {
+  const { data, error } = await supabase
+    .from('platform_controls')
+    .select('withdrawals_locked, withdrawals_lock_reason, updated_by, updated_at')
+    .eq('id', GLOBAL_PLATFORM_CONTROLS_ID)
+    .single();
+  if (error || !data) throw new Error(error?.message ?? 'Global withdrawal control is not configured');
+  return data as WithdrawalControl;
+}
+
+function withdrawalLockReason(errorMessage?: string): string | null {
+  if (!errorMessage?.includes('WITHDRAWALS_LOCKED:')) return null;
+  return errorMessage.split('WITHDRAWALS_LOCKED:')[1]?.trim() || DEFAULT_WITHDRAWAL_LOCK_MESSAGE;
+}
+
+function sendWithdrawalLocked(res: Parameters<typeof sendError>[0], reason?: string | null) {
+  return sendError(res, reason || DEFAULT_WITHDRAWAL_LOCK_MESSAGE, 423, 'WITHDRAWALS_LOCKED');
+}
 
 // ---------------------------------------------------------------------------
 
@@ -67,6 +95,10 @@ const mobileNumberOtpSchema = z.object({
   phone_number: z.string().regex(/^0\d{9}$/, 'Use a 10-digit Ghana phone number beginning with 0'),
 });
 const mobileNumberVerifySchema = mobileNumberOtpSchema.extend({ otp_code: z.string().length(6) });
+const withdrawalLockSchema = z.object({
+  locked: z.boolean(),
+  reason: z.string().trim().max(240).optional(),
+});
 
 const ngBankSchema = z.object({
   amount: z.number().min(30000),
@@ -513,6 +545,16 @@ router.delete('/payout-settings/:id', authenticate, asyncHandler(async (req, res
   return sendSuccess(res, { message: 'Payout method removed' });
 }));
 
+// GET /payments/withdrawal-status
+// Exposes only the user-facing state; admin identity remains on the admin endpoint.
+router.get('/withdrawal-status', authenticate, asyncHandler(async (_req, res) => {
+  const control = await getWithdrawalControl();
+  return sendSuccess(res, {
+    locked: control.withdrawals_locked,
+    reason: control.withdrawals_locked ? control.withdrawals_lock_reason : null,
+  });
+}));
+
 // POST /payments/withdraw
 router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSchema), asyncHandler(async (req, res) => {
   const { amount, payment_provider, account_details } = req.body;
@@ -551,7 +593,11 @@ router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSche
   const { error: requestError } = await supabase.rpc('create_withdrawal_request', {
     p_user_id: req.user!.id, p_amount: amount, p_provider: payment_provider, p_account_details: account_details,
   });
-  if (requestError) return sendError(res, requestError.message, 400);
+  if (requestError) {
+    const lockedReason = withdrawalLockReason(requestError.message);
+    if (lockedReason) return sendWithdrawalLocked(res, lockedReason);
+    return sendError(res, requestError.message, 400);
+  }
 
   return sendSuccess(res, { message: 'Withdrawal request submitted. Awaiting admin approval.' }, 201);
 }));
@@ -589,6 +635,71 @@ router.get('/withdrawals', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ==================== ADMIN PAYMENT ENDPOINTS ====================
+
+// GET /payments/admin/withdrawal-lock
+router.get('/admin/withdrawal-lock', authenticate, requireAdmin, asyncHandler(async (_req, res) => {
+  const control = await getWithdrawalControl();
+  let updatedBy: { id: string; username: string } | null = null;
+  if (control.updated_by) {
+    const { data: admin } = await supabase
+      .from('users')
+      .select('id, username')
+      .eq('id', control.updated_by)
+      .single();
+    if (admin) updatedBy = admin as { id: string; username: string };
+  }
+  return sendSuccess(res, {
+    locked: control.withdrawals_locked,
+    reason: control.withdrawals_lock_reason,
+    updated_at: control.updated_at,
+    updated_by: updatedBy,
+  });
+}));
+
+// PATCH /payments/admin/withdrawal-lock
+router.patch('/admin/withdrawal-lock', authenticate, requireAdmin, validateBody(withdrawalLockSchema), asyncHandler(async (req, res) => {
+  const { locked, reason } = req.body as { locked: boolean; reason?: string };
+  const current = await getWithdrawalControl();
+  const nextReason = locked ? (reason?.trim() || null) : null;
+  const { data, error } = await supabase
+    .from('platform_controls')
+    .update({
+      withdrawals_locked: locked,
+      withdrawals_lock_reason: nextReason,
+      updated_by: req.user!.id,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', GLOBAL_PLATFORM_CONTROLS_ID)
+    .select('withdrawals_locked, withdrawals_lock_reason, updated_by, updated_at')
+    .single();
+  if (error || !data) return sendError(res, error?.message ?? 'Could not update withdrawal control', 500);
+
+  await AdminLogService.log(
+    req.user!.id,
+    locked ? 'lock_global_withdrawals' : 'unlock_global_withdrawals',
+    'platform_controls',
+    GLOBAL_PLATFORM_CONTROLS_ID,
+    {
+      previous_locked: current.withdrawals_locked,
+      locked,
+      previous_reason: current.withdrawals_lock_reason,
+      reason: nextReason,
+    },
+  );
+
+  const { data: updatedByAdmin } = await supabase
+    .from('users')
+    .select('id, username')
+    .eq('id', req.user!.id)
+    .single();
+
+  return sendSuccess(res, {
+    locked: data.withdrawals_locked,
+    reason: data.withdrawals_lock_reason,
+    updated_at: data.updated_at,
+    updated_by: updatedByAdmin ?? { id: req.user!.id },
+  });
+}));
 
 // GET /payments/admin/deposits
 router.get('/admin/deposits', authenticate, requireAdmin, asyncHandler(async (req, res) => {

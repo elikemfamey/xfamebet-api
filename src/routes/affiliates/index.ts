@@ -200,35 +200,20 @@ router.post('/generate-promo', requireAffiliate, async (req, res) => {
 // POST /affiliates/withdraw
 router.post('/withdraw', requireAffiliate, validateBody(withdrawSchema), async (req, res) => {
   const { amount, payment_provider, account_details } = req.body;
-  const { data: affiliate } = await supabase.from('affiliates').select('*').eq('user_id', req.user!.id).single();
-  if (!affiliate) return sendError(res, 'Affiliate not found', 404);
-  if (affiliate.withdrawal_balance < amount) return sendError(res, 'Insufficient affiliate earnings', 400);
-
-  const { data: wallet } = await supabase.from('wallets').select('id').eq('user_id', req.user!.id).single();
-  if (!wallet) return sendError(res, 'Wallet not found', 404);
-
-  await supabase.from('withdrawal_requests').insert({
-    user_id: req.user!.id,
-    amount,
-    currency: 'USD',
-    payment_provider,
-    account_details: { ...account_details, type: 'affiliate_earnings' },
-    status: 'pending',
+  const { error: withdrawalError } = await supabase.rpc('create_affiliate_withdrawal_request', {
+    p_user_id: req.user!.id,
+    p_amount: amount,
+    p_provider: payment_provider,
+    p_account_details: account_details,
   });
-
-  await supabase.from('affiliates')
-    .update({ withdrawal_balance: affiliate.withdrawal_balance - amount })
-    .eq('id', affiliate.id);
-
-  await supabase.from('transactions').insert({
-    user_id: req.user!.id,
-    wallet_id: wallet.id,
-    type: 'affiliate_commission',
-    amount: -amount,
-    currency: 'USD',
-    status: 'pending',
-    description: 'Affiliate commission withdrawal',
-  });
+  if (withdrawalError) {
+    if (withdrawalError.message.includes('WITHDRAWALS_LOCKED:')) {
+      const reason = withdrawalError.message.split('WITHDRAWALS_LOCKED:')[1]?.trim()
+        || 'Withdrawals are temporarily unavailable. Please try again later.';
+      return sendError(res, reason, 423, 'WITHDRAWALS_LOCKED');
+    }
+    return sendError(res, withdrawalError.message, 400);
+  }
 
   return sendSuccess(res, { message: 'Withdrawal request submitted. Awaiting admin approval.' }, 201);
 });

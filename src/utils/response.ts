@@ -14,8 +14,8 @@ export function sendSuccess<T>(res: Response, data: T, statusCode = 200, message
   return res.status(statusCode).json(response);
 }
 
-export function sendError(res: Response, error: string, statusCode = 400) {
-  const response: ApiResponse = { success: false, error };
+export function sendError(res: Response, error: string, statusCode = 400, code?: string) {
+  const response: ApiResponse = { success: false, error, ...(code ? { code } : {}) };
   return res.status(statusCode).json(response);
 }
 
