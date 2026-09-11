@@ -6,6 +6,11 @@ import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { WalletService } from '../../services/walletService';
 import { generateReferralCode } from '../../utils/crypto';
+import {
+  DEFAULT_WITHDRAWAL_LOCK_MESSAGE,
+  getWithdrawalControl,
+  isMissingAffiliateWithdrawalFunction,
+} from '../../services/withdrawalControlService';
 
 const router = Router();
 router.use(authenticate);
@@ -200,6 +205,16 @@ router.post('/generate-promo', requireAffiliate, async (req, res) => {
 // POST /affiliates/withdraw
 router.post('/withdraw', requireAffiliate, validateBody(withdrawSchema), async (req, res) => {
   const { amount, payment_provider, account_details } = req.body;
+  const withdrawalControl = await getWithdrawalControl();
+  if (withdrawalControl.withdrawals_locked) {
+    return sendError(
+      res,
+      withdrawalControl.withdrawals_lock_reason || DEFAULT_WITHDRAWAL_LOCK_MESSAGE,
+      423,
+      'WITHDRAWALS_LOCKED',
+    );
+  }
+
   const { error: withdrawalError } = await supabase.rpc('create_affiliate_withdrawal_request', {
     p_user_id: req.user!.id,
     p_amount: amount,
@@ -212,7 +227,44 @@ router.post('/withdraw', requireAffiliate, validateBody(withdrawSchema), async (
         || 'Withdrawals are temporarily unavailable. Please try again later.';
       return sendError(res, reason, 423, 'WITHDRAWALS_LOCKED');
     }
-    return sendError(res, withdrawalError.message, 400);
+    if (!isMissingAffiliateWithdrawalFunction(withdrawalError)) {
+      return sendError(res, withdrawalError.message, 400);
+    }
+
+    // Compatibility path for deployments where migration 031 has not yet run.
+    // The Redis-backed control above still blocks all API-originated requests.
+    const { data: affiliate } = await supabase.from('affiliates').select('*').eq('user_id', req.user!.id).single();
+    if (!affiliate) return sendError(res, 'Affiliate not found', 404);
+    if (affiliate.withdrawal_balance < amount) return sendError(res, 'Insufficient affiliate earnings', 400);
+    const { data: wallet } = await supabase.from('wallets').select('id').eq('user_id', req.user!.id).single();
+    if (!wallet) return sendError(res, 'Wallet not found', 404);
+
+    const { error: requestError } = await supabase.from('withdrawal_requests').insert({
+      user_id: req.user!.id,
+      amount,
+      currency: 'USD',
+      payment_provider,
+      account_details: { ...account_details, type: 'affiliate_earnings' },
+      status: 'pending',
+    });
+    if (requestError) return sendError(res, requestError.message, 400);
+
+    const { error: balanceError } = await supabase.from('affiliates')
+      .update({ withdrawal_balance: affiliate.withdrawal_balance - amount })
+      .eq('id', affiliate.id);
+    if (balanceError) return sendError(res, 'Could not reserve affiliate earnings', 500);
+
+    const { error: transactionError } = await supabase.from('transactions').insert({
+      user_id: req.user!.id,
+      wallet_id: wallet.id,
+      type: 'affiliate_commission',
+      amount: -amount,
+      currency: 'USD',
+      status: 'pending',
+      payment_provider,
+      description: 'Affiliate commission withdrawal',
+    });
+    if (transactionError) return sendError(res, 'Could not create the affiliate withdrawal ledger entry', 500);
   }
 
   return sendSuccess(res, { message: 'Withdrawal request submitted. Awaiting admin approval.' }, 201);

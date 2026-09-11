@@ -15,6 +15,13 @@ import { MoolreApiError, MoolreService } from '../../services/moolreService';
 import { redis } from '../../config/redis';
 import { sendOtpSms } from '../../services/smsService';
 import { generateOtp } from '../../utils/crypto';
+import {
+  DEFAULT_WITHDRAWAL_LOCK_MESSAGE,
+  GLOBAL_PLATFORM_CONTROLS_ID,
+  getWithdrawalControl,
+  setWithdrawalControl,
+  withdrawalLockReason,
+} from '../../services/withdrawalControlService';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -30,30 +37,6 @@ const router = Router();
 // ---------------------------------------------------------------------------
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
-const GLOBAL_PLATFORM_CONTROLS_ID = '00000000-0000-0000-0000-000000000001';
-const DEFAULT_WITHDRAWAL_LOCK_MESSAGE = 'Withdrawals are temporarily unavailable. Please try again later.';
-
-type WithdrawalControl = {
-  withdrawals_locked: boolean;
-  withdrawals_lock_reason: string | null;
-  updated_by: string | null;
-  updated_at: string;
-};
-
-async function getWithdrawalControl(): Promise<WithdrawalControl> {
-  const { data, error } = await supabase
-    .from('platform_controls')
-    .select('withdrawals_locked, withdrawals_lock_reason, updated_by, updated_at')
-    .eq('id', GLOBAL_PLATFORM_CONTROLS_ID)
-    .single();
-  if (error || !data) throw new Error(error?.message ?? 'Global withdrawal control is not configured');
-  return data as WithdrawalControl;
-}
-
-function withdrawalLockReason(errorMessage?: string): string | null {
-  if (!errorMessage?.includes('WITHDRAWALS_LOCKED:')) return null;
-  return errorMessage.split('WITHDRAWALS_LOCKED:')[1]?.trim() || DEFAULT_WITHDRAWAL_LOCK_MESSAGE;
-}
 
 function sendWithdrawalLocked(res: Parameters<typeof sendError>[0], reason?: string | null) {
   return sendError(res, reason || DEFAULT_WITHDRAWAL_LOCK_MESSAGE, 423, 'WITHDRAWALS_LOCKED');
@@ -558,6 +541,10 @@ router.get('/withdrawal-status', authenticate, asyncHandler(async (_req, res) =>
 // POST /payments/withdraw
 router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSchema), asyncHandler(async (req, res) => {
   const { amount, payment_provider, account_details } = req.body;
+  const withdrawalControl = await getWithdrawalControl();
+  if (withdrawalControl.withdrawals_locked) {
+    return sendWithdrawalLocked(res, withdrawalControl.withdrawals_lock_reason);
+  }
 
   // Never allow a client to choose an arbitrary MoMo payout recipient. The selected
   // saved method must belong to this player and have completed number verification.
@@ -661,18 +648,7 @@ router.patch('/admin/withdrawal-lock', authenticate, requireAdmin, validateBody(
   const { locked, reason } = req.body as { locked: boolean; reason?: string };
   const current = await getWithdrawalControl();
   const nextReason = locked ? (reason?.trim() || null) : null;
-  const { data, error } = await supabase
-    .from('platform_controls')
-    .update({
-      withdrawals_locked: locked,
-      withdrawals_lock_reason: nextReason,
-      updated_by: req.user!.id,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', GLOBAL_PLATFORM_CONTROLS_ID)
-    .select('withdrawals_locked, withdrawals_lock_reason, updated_by, updated_at')
-    .single();
-  if (error || !data) return sendError(res, error?.message ?? 'Could not update withdrawal control', 500);
+  const data = await setWithdrawalControl({ locked, reason: nextReason, adminId: req.user!.id });
 
   await AdminLogService.log(
     req.user!.id,
