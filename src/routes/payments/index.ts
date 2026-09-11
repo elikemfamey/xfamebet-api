@@ -16,12 +16,11 @@ import { redis } from '../../config/redis';
 import { sendOtpSms } from '../../services/smsService';
 import { generateOtp } from '../../utils/crypto';
 import {
-  DEFAULT_WITHDRAWAL_LOCK_MESSAGE,
   GLOBAL_PLATFORM_CONTROLS_ID,
-  getWithdrawalControl,
-  setWithdrawalControl,
-  withdrawalLockReason,
-} from '../../services/withdrawalControlService';
+  WITHDRAWAL_REQUIREMENT_MIGRATION_REQUIRED,
+  getWithdrawalDepositRequirement,
+  setWithdrawalDepositRequirement,
+} from '../../services/withdrawalDepositRequirementService';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -37,10 +36,6 @@ const router = Router();
 // ---------------------------------------------------------------------------
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
-
-function sendWithdrawalLocked(res: Parameters<typeof sendError>[0], reason?: string | null) {
-  return sendError(res, reason || DEFAULT_WITHDRAWAL_LOCK_MESSAGE, 423, 'WITHDRAWALS_LOCKED');
-}
 
 // ---------------------------------------------------------------------------
 
@@ -78,9 +73,8 @@ const mobileNumberOtpSchema = z.object({
   phone_number: z.string().regex(/^0\d{9}$/, 'Use a 10-digit Ghana phone number beginning with 0'),
 });
 const mobileNumberVerifySchema = mobileNumberOtpSchema.extend({ otp_code: z.string().length(6) });
-const withdrawalLockSchema = z.object({
-  locked: z.boolean(),
-  reason: z.string().trim().max(240).optional(),
+const withdrawalDepositRequirementSchema = z.object({
+  enabled: z.boolean(),
 });
 
 const ngBankSchema = z.object({
@@ -528,23 +522,9 @@ router.delete('/payout-settings/:id', authenticate, asyncHandler(async (req, res
   return sendSuccess(res, { message: 'Payout method removed' });
 }));
 
-// GET /payments/withdrawal-status
-// Exposes only the user-facing state; admin identity remains on the admin endpoint.
-router.get('/withdrawal-status', authenticate, asyncHandler(async (_req, res) => {
-  const control = await getWithdrawalControl();
-  return sendSuccess(res, {
-    locked: control.withdrawals_locked,
-    reason: control.withdrawals_locked ? control.withdrawals_lock_reason : null,
-  });
-}));
-
 // POST /payments/withdraw
 router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSchema), asyncHandler(async (req, res) => {
   const { amount, payment_provider, account_details } = req.body;
-  const withdrawalControl = await getWithdrawalControl();
-  if (withdrawalControl.withdrawals_locked) {
-    return sendWithdrawalLocked(res, withdrawalControl.withdrawals_lock_reason);
-  }
 
   // Never allow a client to choose an arbitrary MoMo payout recipient. The selected
   // saved method must belong to this player and have completed number verification.
@@ -580,11 +560,7 @@ router.post('/withdraw', authenticate, paymentLimiter, validateBody(withdrawSche
   const { error: requestError } = await supabase.rpc('create_withdrawal_request', {
     p_user_id: req.user!.id, p_amount: amount, p_provider: payment_provider, p_account_details: account_details,
   });
-  if (requestError) {
-    const lockedReason = withdrawalLockReason(requestError.message);
-    if (lockedReason) return sendWithdrawalLocked(res, lockedReason);
-    return sendError(res, requestError.message, 400);
-  }
+  if (requestError) return sendError(res, requestError.message, 400);
 
   return sendSuccess(res, { message: 'Withdrawal request submitted. Awaiting admin approval.' }, 201);
 }));
@@ -625,7 +601,7 @@ router.get('/withdrawals', authenticate, asyncHandler(async (req, res) => {
 
 // GET /payments/admin/withdrawal-lock
 router.get('/admin/withdrawal-lock', authenticate, requireAdmin, asyncHandler(async (_req, res) => {
-  const control = await getWithdrawalControl();
+  const control = await getWithdrawalDepositRequirement();
   let updatedBy: { id: string; username: string } | null = null;
   if (control.updated_by) {
     const { data: admin } = await supabase
@@ -636,30 +612,34 @@ router.get('/admin/withdrawal-lock', authenticate, requireAdmin, asyncHandler(as
     if (admin) updatedBy = admin as { id: string; username: string };
   }
   return sendSuccess(res, {
-    locked: control.withdrawals_locked,
-    reason: control.withdrawals_lock_reason,
+    enabled: control.enabled,
     updated_at: control.updated_at,
     updated_by: updatedBy,
   });
 }));
 
 // PATCH /payments/admin/withdrawal-lock
-router.patch('/admin/withdrawal-lock', authenticate, requireAdmin, validateBody(withdrawalLockSchema), asyncHandler(async (req, res) => {
-  const { locked, reason } = req.body as { locked: boolean; reason?: string };
-  const current = await getWithdrawalControl();
-  const nextReason = locked ? (reason?.trim() || null) : null;
-  const data = await setWithdrawalControl({ locked, reason: nextReason, adminId: req.user!.id });
+router.patch('/admin/withdrawal-lock', authenticate, requireAdmin, validateBody(withdrawalDepositRequirementSchema), asyncHandler(async (req, res) => {
+  const { enabled } = req.body as { enabled: boolean };
+  const current = await getWithdrawalDepositRequirement();
+  let data;
+  try {
+    data = await setWithdrawalDepositRequirement({ enabled, adminId: req.user!.id });
+  } catch (error) {
+    if (error instanceof Error && error.message === WITHDRAWAL_REQUIREMENT_MIGRATION_REQUIRED) {
+      return sendError(res, 'Database migration 031 must be applied before this setting can be changed', 503, WITHDRAWAL_REQUIREMENT_MIGRATION_REQUIRED);
+    }
+    throw error;
+  }
 
   await AdminLogService.log(
     req.user!.id,
-    locked ? 'lock_global_withdrawals' : 'unlock_global_withdrawals',
+    enabled ? 'enable_withdrawal_deposit_requirement' : 'disable_withdrawal_deposit_requirement',
     'platform_controls',
     GLOBAL_PLATFORM_CONTROLS_ID,
     {
-      previous_locked: current.withdrawals_locked,
-      locked,
-      previous_reason: current.withdrawals_lock_reason,
-      reason: nextReason,
+      previous_enabled: current.enabled,
+      enabled,
     },
   );
 
@@ -670,8 +650,7 @@ router.patch('/admin/withdrawal-lock', authenticate, requireAdmin, validateBody(
     .single();
 
   return sendSuccess(res, {
-    locked: data.withdrawals_locked,
-    reason: data.withdrawals_lock_reason,
+    enabled: data.enabled,
     updated_at: data.updated_at,
     updated_by: updatedByAdmin ?? { id: req.user!.id },
   });
