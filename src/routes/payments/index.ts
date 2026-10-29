@@ -12,7 +12,7 @@ import { paymentLimiter } from '../../middleware/rateLimiter';
 import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
 import { AffiliateService } from '../../services/affiliateService';
-import { MoolreApiError, MoolreService, type MoolreCollectionResponse } from '../../services/moolreService';
+import { MoolreApiError, MoolreService } from '../../services/moolreService';
 import { getMoolreMetadata, getMoolreRetryState, type MoolreMetadata } from '../../services/moolrePaymentState';
 import { logger } from '../../utils/logger';
 import {
@@ -194,26 +194,24 @@ router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(m
     status: 'pending', metadata: { network, channel, payment_method_id, payment_mode: 'mobile_money_prompt', first_deposit_fixed_amount: isFirstGhsDeposit },
   });
   if (error) return sendError(res, 'Could not create deposit request', 500);
-  let result: MoolreCollectionResponse;
   try {
-    result = await MoolreService.requestMobileMoneyPayment({ amount, reference, phone: phone_number, channel });
+    const result = await MoolreService.requestMobileMoneyPayment({ amount, reference, phone: phone_number, channel });
+    const promptRequestedAt = result.code === 'TR099' ? new Date().toISOString() : undefined;
+    await supabase.from('deposit_requests').update({ metadata: {
+      network, channel, payment_method_id, payment_mode: 'mobile_money_prompt', moolre_code: result.code,
+      moolre_request_id: result.data, ...(promptRequestedAt ? { prompt_requested_at: promptRequestedAt } : {}),
+      first_deposit_fixed_amount: isFirstGhsDeposit,
+    } }).eq('reference', reference);
+    logMoolreCollection('initial', { reference, channel, phone: phone_number }, result);
+    return sendSuccess(res, {
+      reference, amount, first_deposit: isFirstGhsDeposit, ...moolreResponseFields(result),
+      message: result.message ?? (result.code === 'TR099' ? 'Moolre accepted the payment request.' : 'Moolre requires additional verification.'),
+    });
   } catch (err) {
     await supabase.from('deposit_requests').update({ status: 'rejected', notes: 'Moolre mobile money request failed' }).eq('reference', reference);
     if (err instanceof MoolreApiError) return sendError(res, `Moolre rejected the payment request${err.providerCode ? ` (${err.providerCode})` : ''}: ${err.message}`, 502);
     throw err;
   }
-  const promptRequestedAt = result.code === 'TR099' ? new Date().toISOString() : undefined;
-  const { error: metadataError } = await supabase.from('deposit_requests').update({ metadata: {
-    network, channel, payment_method_id, payment_mode: 'mobile_money_prompt', moolre_code: result.code,
-    moolre_request_id: result.data, ...(promptRequestedAt ? { prompt_requested_at: promptRequestedAt } : {}),
-    first_deposit_fixed_amount: isFirstGhsDeposit,
-  } }).eq('reference', reference);
-  if (metadataError) logger.error('Moolre request accepted but its state could not be saved', { reference, error: metadataError.message });
-  logMoolreCollection('initial', { reference, channel, phone: phone_number }, result);
-  return sendSuccess(res, {
-    reference, amount, first_deposit: isFirstGhsDeposit, ...moolreResponseFields(result),
-    message: result.message ?? (result.code === 'TR099' ? 'Moolre accepted the payment request.' : 'Moolre requires additional verification.'),
-  });
 }));
 
 // POST /payments/moolre/mobile-money/otp -- completes Moolre's optional OTP step.
@@ -235,7 +233,7 @@ router.post('/moolre/mobile-money/otp', authenticate, paymentLimiter, validateBo
       otp_submitted_at: new Date().toISOString(),
       ...(promptRequestedAt ? { prompt_requested_at: promptRequestedAt } : {}),
     } }).eq('id', deposit.id);
-    if (metadataError) logger.error('Moolre OTP accepted but its state could not be saved', { reference, error: metadataError.message });
+    if (metadataError) throw new Error(`Could not save Moolre OTP state: ${metadataError.message}`);
     logMoolreCollection('otp', { reference, channel, phone: deposit.account_number }, result);
     return sendSuccess(res, {
       reference, ...moolreResponseFields(result),
@@ -254,9 +252,6 @@ router.post('/moolre/:reference/verify', authenticate, paymentLimiter, asyncHand
   if (!deposit) return sendError(res, 'Moolre deposit not found', 404);
   if (deposit.status === 'completed') return sendSuccess(res, { status: 'completed', credited: false, retry_allowed: false, retry_after_seconds: 0 });
   const result = await MoolreService.verifyAndCredit(deposit);
-  if (result?.already_completed) {
-    return sendSuccess(res, { status: 'completed', credited: false, retry_allowed: false, retry_after_seconds: 0 });
-  }
   if (result?.user_id) {
     if (!result.already_completed) {
       await NotificationService.send(result.user_id, 'deposit_approved', 'Deposit Approved', `Your Moolre deposit of GHS ${result.amount} has been credited.`);
@@ -294,7 +289,6 @@ router.post('/moolre/:reference/retry', authenticate, paymentLimiter, asyncHandl
 
     // A final provider check prevents a new prompt when the original payment has just completed.
     const verified = await MoolreService.verifyAndCredit(deposit);
-    if (verified?.already_completed) return sendSuccess(res, { status: 'completed', credited: false });
     if (verified?.user_id) {
       if (!verified.already_completed) {
         await NotificationService.send(verified.user_id, 'deposit_approved', 'Deposit Approved', `Your Moolre deposit of GHS ${verified.amount} has been credited.`);
@@ -335,39 +329,34 @@ router.post('/moolre/:reference/retry', authenticate, paymentLimiter, asyncHandl
       status: 'pending',
       metadata: retryMetadata,
     });
-    if (insertError) {
-      await supabase.from('deposit_requests').update({ metadata }).eq('id', deposit.id);
-      throw new Error(`Could not create Moolre retry: ${insertError.message}`);
-    }
+    if (insertError) throw new Error(`Could not create Moolre retry: ${insertError.message}`);
 
-    let result: MoolreCollectionResponse;
     try {
-      result = await MoolreService.requestMobileMoneyPayment({
+      const result = await MoolreService.requestMobileMoneyPayment({
         amount: deposit.amount, reference: retryReference, phone: deposit.account_number, channel,
+      });
+      const promptRequestedAt = result.code === 'TR099' ? new Date().toISOString() : undefined;
+      const finalMetadata = {
+        ...retryMetadata,
+        moolre_code: result.code,
+        moolre_request_id: result.data,
+        ...(promptRequestedAt ? { prompt_requested_at: promptRequestedAt } : {}),
+      };
+      const { error: retryUpdateError } = await supabase.from('deposit_requests')
+        .update({ metadata: finalMetadata }).eq('reference', retryReference);
+      if (retryUpdateError) throw new Error(`Could not save Moolre retry state: ${retryUpdateError.message}`);
+      logMoolreCollection('retry', { reference: retryReference, channel, phone: deposit.account_number }, result);
+      return sendSuccess(res, {
+        status: 'pending', reference: retryReference, retried_from: reference, ...moolreResponseFields(result),
+        message: result.message ?? (result.code === 'TR099' ? 'Moolre accepted the new payment request.' : 'Moolre requires additional verification.'),
       });
     } catch (err) {
       await supabase.from('deposit_requests').update({ status: 'rejected', notes: 'Moolre prompt retry failed' }).eq('reference', retryReference);
       if (err instanceof MoolreApiError) return sendError(res, `Moolre rejected the retry${err.providerCode ? ` (${err.providerCode})` : ''}: ${err.message}`, 502);
       throw err;
     }
-    const promptRequestedAt = result.code === 'TR099' ? new Date().toISOString() : undefined;
-    const finalMetadata = {
-      ...retryMetadata,
-      moolre_code: result.code,
-      moolre_request_id: result.data,
-      ...(promptRequestedAt ? { prompt_requested_at: promptRequestedAt } : {}),
-    };
-    const { error: retryUpdateError } = await supabase.from('deposit_requests')
-      .update({ metadata: finalMetadata }).eq('reference', retryReference);
-    if (retryUpdateError) logger.error('Moolre retry accepted but its state could not be saved', { reference: retryReference, error: retryUpdateError.message });
-    logMoolreCollection('retry', { reference: retryReference, channel, phone: deposit.account_number }, result);
-    return sendSuccess(res, {
-      status: 'pending', reference: retryReference, retried_from: reference, ...moolreResponseFields(result),
-      message: result.message ?? (result.code === 'TR099' ? 'Moolre accepted the new payment request.' : 'Moolre requires additional verification.'),
-    });
   } finally {
-    try { await redis.del(lockKey); }
-    catch (err) { logger.warn('Could not release Moolre retry lock; it will expire automatically', { reference, err }); }
+    await redis.del(lockKey);
   }
 }));
 
