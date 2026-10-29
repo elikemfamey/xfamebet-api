@@ -34,6 +34,7 @@ const registerPhoneSchema = z.object({
   phone: z.string().min(10).max(20),
   password: z.string().min(8).max(100),
   country: z.string().length(2).default('GH'),
+  momo_network: z.enum(['mtn', 'telecel', 'airteltigo']).optional(),
   referral_code: z.string().optional(),
   promo_code: z.string().optional(),
 });
@@ -506,7 +507,7 @@ router.post('/send-otp', authenticate, async (req, res) => {
 
 // POST /auth/register-phone — phone + password → write directly to DB (no OTP)
 router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), async (req, res) => {
-  const { phone, password, country, referral_code, promo_code } = req.body;
+  const { phone, password, country, momo_network, referral_code, promo_code } = req.body;
 
   try {
     const { data: existing } = await supabase.from('users').select('id').eq('phone', phone).single();
@@ -540,6 +541,32 @@ router.post('/register-phone', authLimiter, validateBody(registerPhoneSchema), a
     }).select().single();
 
     if (error || !user) return sendError(res, 'Registration failed', 500);
+
+    // Ghana registrations use the sign-up phone as their initial MoMo method.
+    // It remains deposit-only until Moolre confirms the first completed payment.
+    if (country === 'GH' && momo_network) {
+      const digits = phone.replace(/\D/g, '');
+      const localPhone = digits.startsWith('233') && digits.length === 12
+        ? `0${digits.slice(3)}`
+        : digits.length === 10 && digits.startsWith('0') ? digits : null;
+      const methodTypes = {
+        mtn: 'momo_mtn', telecel: 'momo_telecel', airteltigo: 'momo_airteltigo',
+      } as const;
+      if (localPhone) {
+        const { error: methodError } = await supabase.from('payment_methods').insert({
+          user_id: user.id,
+          method_type: methodTypes[momo_network as keyof typeof methodTypes],
+          country: 'GH',
+          provider: momo_network,
+          account_number: localPhone,
+          account_name: 'Registration phone',
+          is_default: true,
+          status: 'active',
+          verified_phone: false,
+        });
+        if (methodError) logger.error('registration default MoMo method failed', { userId: user.id, methodError });
+      }
+    }
 
     if (promo_code) {
       const { data: promo } = await supabase.from('promo_codes').select('*').eq('code', promo_code.toUpperCase()).eq('status', 'active').single();

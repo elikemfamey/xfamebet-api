@@ -1,5 +1,6 @@
 import { env } from '../config/env';
 import { supabase } from '../config/supabase';
+import { logger } from '../utils/logger';
 
 type MoolreStatus = {
   txstatus?: number | string;
@@ -108,6 +109,36 @@ export class MoolreService {
       p_deposit_id: deposit.id, p_transaction_id: transactionId, p_provider_payload: status,
     });
     if (error) throw new Error(error.message);
-    return data as { already_completed?: boolean; user_id?: string; amount?: number };
+    const result = data as { already_completed?: boolean; user_id?: string; amount?: number };
+
+    // A completed Moolre collection proves control of the payer number. Promote
+    // the saved method only now so an unverified number can never receive a payout.
+    if (result?.user_id) {
+      const { data: savedDeposit, error: depositError } = await supabase
+        .from('deposit_requests')
+        .select('account_number, metadata')
+        .eq('id', deposit.id)
+        .single();
+      const metadata = (savedDeposit?.metadata ?? {}) as Record<string, unknown>;
+      const paymentMethodId = typeof metadata.payment_method_id === 'string' ? metadata.payment_method_id : null;
+      if (!depositError && paymentMethodId && savedDeposit?.account_number) {
+        const { error: methodError } = await supabase
+          .from('payment_methods')
+          .update({ verified_phone: true, verified_at: new Date().toISOString() })
+          .eq('id', paymentMethodId)
+          .eq('user_id', result.user_id)
+          .eq('account_number', savedDeposit.account_number)
+          .eq('status', 'active');
+        if (methodError) logger.warn('Moolre payment succeeded but the saved number could not be marked verified', {
+          depositId: deposit.id, paymentMethodId, error: methodError.message,
+        });
+      } else if (depositError) {
+        logger.warn('Moolre payment succeeded but its saved payment method could not be loaded', {
+          depositId: deposit.id, error: depositError.message,
+        });
+      }
+    }
+
+    return result;
   }
 }

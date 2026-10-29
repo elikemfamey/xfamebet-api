@@ -12,9 +12,6 @@ import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
 import { AffiliateService } from '../../services/affiliateService';
 import { MoolreApiError, MoolreService } from '../../services/moolreService';
-import { redis } from '../../config/redis';
-import { sendOtpSms } from '../../services/smsService';
-import { generateOtp } from '../../utils/crypto';
 import {
   GLOBAL_PLATFORM_CONTROLS_ID,
   WITHDRAWAL_REQUIREMENT_MIGRATION_REQUIRED,
@@ -68,11 +65,10 @@ const payoutSettingsSchema = z.object({
   is_default: z.boolean().optional().default(true),
 });
 
-const mobileNumberOtpSchema = z.object({
+const mobileNumberSchema = z.object({
   network: z.enum(['mtn', 'telecel', 'airteltigo']),
   phone_number: z.string().regex(/^0\d{9}$/, 'Use a 10-digit Ghana phone number beginning with 0'),
 });
-const mobileNumberVerifySchema = mobileNumberOtpSchema.extend({ otp_code: z.string().length(6) });
 const withdrawalDepositRequirementSchema = z.object({
   enabled: z.boolean(),
 });
@@ -119,14 +115,11 @@ const MOOLRE_CHANNELS: Record<'mtn' | 'telecel' | 'airteltigo', string> = { mtn:
 const MOOLRE_PROVIDERS: Record<'mtn' | 'telecel' | 'airteltigo', 'momo_mtn' | 'momo_telecel' | 'momo_airteltigo'> = {
   mtn: 'momo_mtn', telecel: 'momo_telecel', airteltigo: 'momo_airteltigo',
 };
-const PAYMENT_NUMBER_OTP_KEY = (userId: string, phone: string) => `payment_number_otp:${userId}:${phone}`;
-const PAYMENT_NUMBER_COOLDOWN_KEY = (userId: string, phone: string) => `payment_number_cooldown:${userId}:${phone}`;
-
-async function selectedVerifiedMomoMethod(userId: string, methodId: string, phone: string, network: 'mtn' | 'telecel' | 'airteltigo') {
+async function selectedMomoMethod(userId: string, methodId: string, phone: string, network: 'mtn' | 'telecel' | 'airteltigo') {
   const { data: method } = await supabase.from('payment_methods').select('id, account_number, method_type, verified_phone')
     .eq('id', methodId).eq('user_id', userId).eq('status', 'active').single();
-  if (!method || !method.verified_phone || method.account_number !== phone || method.method_type !== MOOLRE_PROVIDERS[network]) {
-    throw new Error('Select a verified mobile money number for this network');
+  if (!method || method.account_number !== phone || method.method_type !== MOOLRE_PROVIDERS[network]) {
+    throw new Error('Select a saved mobile money number for this network');
   }
   return method;
 }
@@ -148,18 +141,18 @@ router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(m
   const { amount, network, phone_number, payment_method_id } = req.body;
   try { await getEligibleMoolreWallet(req.user!.id); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
-  try { await selectedVerifiedMomoMethod(req.user!.id, payment_method_id, phone_number, network); }
+  try { await selectedMomoMethod(req.user!.id, payment_method_id, phone_number, network); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
   const reference = `MLR-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const channel = MOOLRE_CHANNELS[network as keyof typeof MOOLRE_CHANNELS];
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id, amount, currency: 'GHS', payment_provider: 'moolre', reference, account_number: phone_number,
-    status: 'pending', metadata: { network, channel, payment_mode: 'mobile_money_prompt' },
+    status: 'pending', metadata: { network, channel, payment_method_id, payment_mode: 'mobile_money_prompt' },
   });
   if (error) return sendError(res, 'Could not create deposit request', 500);
   try {
     const result = await MoolreService.requestMobileMoneyPayment({ amount, reference, phone: phone_number, channel });
-    await supabase.from('deposit_requests').update({ metadata: { network, channel, payment_mode: 'mobile_money_prompt', moolre_code: result.code } }).eq('reference', reference);
+    await supabase.from('deposit_requests').update({ metadata: { network, channel, payment_method_id, payment_mode: 'mobile_money_prompt', moolre_code: result.code } }).eq('reference', reference);
     return sendSuccess(res, {
       reference, code: result.code, otp_required: result.code === 'TP14', prompt_sent: result.code === 'TR099',
       message: result.message ?? (result.code === 'TR099' ? 'Payment prompt sent.' : 'Moolre requires additional verification.'),
@@ -415,50 +408,36 @@ router.get('/payout-settings', authenticate, asyncHandler(async (req, res) => {
   return sendSuccess(res, data ?? []);
 }));
 
-// POST /payments/mobile-numbers/otp -- send a verification code before a new MoMo number can be saved.
-router.post('/mobile-numbers/otp', authenticate, paymentLimiter, validateBody(mobileNumberOtpSchema), asyncHandler(async (req, res) => {
+// POST /payments/mobile-numbers -- save a MoMo number without a separate platform OTP.
+// Moolre verifies control of the number during the first successful payment. Until
+// then, the number can be used for deposits but is not eligible for withdrawals.
+router.post('/mobile-numbers', authenticate, paymentLimiter, validateBody(mobileNumberSchema), asyncHandler(async (req, res) => {
   const { network, phone_number } = req.body;
   const { data: user } = await supabase.from('users').select('country').eq('id', req.user!.id).single();
   if (user?.country !== 'GH') return sendError(res, 'Saved mobile money numbers are currently available to Ghana users only', 403);
-  if (await redis.get(PAYMENT_NUMBER_COOLDOWN_KEY(req.user!.id, phone_number))) return sendError(res, 'Please wait 60 seconds before requesting another code', 429);
-  const otp = generateOtp();
-  await redis.setex(PAYMENT_NUMBER_OTP_KEY(req.user!.id, phone_number), 600, JSON.stringify({ otp, network }));
-  await redis.setex(PAYMENT_NUMBER_COOLDOWN_KEY(req.user!.id, phone_number), 60, '1');
-  try {
-    await sendOtpSms(phone_number, otp, 'GH');
-  } catch {
-    await redis.del(PAYMENT_NUMBER_OTP_KEY(req.user!.id, phone_number));
-    return sendError(res, 'SMS delivery failed. Please try again.', 503);
-  }
-  return sendSuccess(res, { message: 'Verification code sent' });
-}));
-
-// POST /payments/mobile-numbers/verify -- save a verified number as an eligible deposit/payout method.
-router.post('/mobile-numbers/verify', authenticate, paymentLimiter, validateBody(mobileNumberVerifySchema), asyncHandler(async (req, res) => {
-  const { network, phone_number, otp_code } = req.body;
-  const key = PAYMENT_NUMBER_OTP_KEY(req.user!.id, phone_number);
-  const raw = await redis.get(key);
-  if (!raw) return sendError(res, 'Verification code has expired. Request another code.', 400);
-  const pending = JSON.parse(raw) as { otp: string; network: 'mtn' | 'telecel' | 'airteltigo' };
-  if (pending.otp !== otp_code || pending.network !== network) return sendError(res, 'Invalid verification code', 400);
-  await redis.del(key);
   const methodType = MOOLRE_PROVIDERS[network as 'mtn' | 'telecel' | 'airteltigo'];
-  const { data: existing } = await supabase.from('payment_methods').select('id')
+  const { data: existing } = await supabase.from('payment_methods').select('id, verified_phone')
     .eq('user_id', req.user!.id).eq('account_number', phone_number).eq('method_type', methodType).single();
   let methodId = existing?.id;
   if (methodId) {
-    await supabase.from('payment_methods').update({ status: 'active', verified_phone: true, verified_at: new Date().toISOString(), provider: network }).eq('id', methodId);
+    await supabase.from('payment_methods').update({ status: 'active', provider: network }).eq('id', methodId);
   } else {
     const { count } = await supabase.from('payment_methods').select('*', { count: 'exact', head: true })
-      .eq('user_id', req.user!.id).eq('status', 'active').eq('verified_phone', true);
+      .eq('user_id', req.user!.id).eq('status', 'active');
     const { data, error } = await supabase.from('payment_methods').insert({
       user_id: req.user!.id, method_type: methodType, country: 'GH', provider: network, account_number: phone_number,
-      account_name: 'Mobile Money', is_default: (count ?? 0) === 0, status: 'active', verified_phone: true, verified_at: new Date().toISOString(),
+      account_name: 'Mobile Money', is_default: (count ?? 0) === 0, status: 'active', verified_phone: false,
     }).select('id').single();
-    if (error || !data) return sendError(res, 'Could not save verified number', 500);
+    if (error || !data) return sendError(res, 'Could not save mobile money number', 500);
     methodId = data.id;
   }
-  return sendSuccess(res, { id: methodId, message: 'Mobile money number verified and saved' }, 201);
+  return sendSuccess(res, {
+    id: methodId,
+    verified_phone: existing?.verified_phone ?? false,
+    message: existing?.verified_phone
+      ? 'Mobile money number saved'
+      : 'Mobile money number saved. Moolre will verify it during your first completed deposit.',
+  }, 201);
 }));
 
 // POST /payments/mobile-numbers/:id/default -- choose the default verified MoMo number.
