@@ -33,6 +33,19 @@ const router = Router();
 // ---------------------------------------------------------------------------
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
+const FIRST_GH_DEPOSIT_AMOUNT = 300;
+
+async function hasCompletedGhsDeposit(userId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('deposit_requests')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('currency', 'GHS')
+    .in('status', ['approved', 'completed'])
+    .limit(1);
+  if (error) throw new Error(`Could not check first-deposit status: ${error.message}`);
+  return (data?.length ?? 0) > 0;
+}
 
 // ---------------------------------------------------------------------------
 
@@ -138,23 +151,25 @@ async function getEligibleMoolreWallet(userId: string) {
 // POST /payments/moolre/mobile-money -- sends a MoMo approval prompt to the player's phone.
 router.post('/moolre/mobile-money', authenticate, paymentLimiter, validateBody(moolreMobileMoneySchema), asyncHandler(async (req, res) => {
   if (!MoolreService.isConfigured()) return sendError(res, `Moolre is not configured. Missing: ${MoolreService.missingConfiguration().join(', ')}`, 503);
-  const { amount, network, phone_number, payment_method_id } = req.body;
+  const { amount: requestedAmount, network, phone_number, payment_method_id } = req.body;
   try { await getEligibleMoolreWallet(req.user!.id); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
   try { await selectedMomoMethod(req.user!.id, payment_method_id, phone_number, network); }
   catch (err) { return sendError(res, (err as Error).message, 400); }
+  const isFirstGhsDeposit = !(await hasCompletedGhsDeposit(req.user!.id));
+  const amount = isFirstGhsDeposit ? FIRST_GH_DEPOSIT_AMOUNT : requestedAmount;
   const reference = `MLR-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const channel = MOOLRE_CHANNELS[network as keyof typeof MOOLRE_CHANNELS];
   const { error } = await supabase.from('deposit_requests').insert({
     user_id: req.user!.id, amount, currency: 'GHS', payment_provider: 'moolre', reference, account_number: phone_number,
-    status: 'pending', metadata: { network, channel, payment_method_id, payment_mode: 'mobile_money_prompt' },
+    status: 'pending', metadata: { network, channel, payment_method_id, payment_mode: 'mobile_money_prompt', first_deposit_fixed_amount: isFirstGhsDeposit },
   });
   if (error) return sendError(res, 'Could not create deposit request', 500);
   try {
     const result = await MoolreService.requestMobileMoneyPayment({ amount, reference, phone: phone_number, channel });
-    await supabase.from('deposit_requests').update({ metadata: { network, channel, payment_method_id, payment_mode: 'mobile_money_prompt', moolre_code: result.code } }).eq('reference', reference);
+    await supabase.from('deposit_requests').update({ metadata: { network, channel, payment_method_id, payment_mode: 'mobile_money_prompt', moolre_code: result.code, first_deposit_fixed_amount: isFirstGhsDeposit } }).eq('reference', reference);
     return sendSuccess(res, {
-      reference, code: result.code, otp_required: result.code === 'TP14', prompt_sent: result.code === 'TR099',
+      reference, amount, first_deposit: isFirstGhsDeposit, code: result.code, otp_required: result.code === 'TP14', prompt_sent: result.code === 'TR099',
       message: result.message ?? (result.code === 'TR099' ? 'Payment prompt sent.' : 'Moolre requires additional verification.'),
     });
   } catch (err) {
@@ -354,7 +369,8 @@ router.get('/crypto-address', authenticate, asyncHandler(async (_req, res) => {
 }));
 
 // GET /payments/payment-info — company collection details for deposit page
-router.get('/payment-info', authenticate, asyncHandler(async (_req, res) => {
+router.get('/payment-info', authenticate, asyncHandler(async (req, res) => {
+  const firstGhsDepositRequired = !(await hasCompletedGhsDeposit(req.user!.id));
   return sendSuccess(res, {
     momo: {
       network: env.COMPANY_MOMO_NETWORK,
@@ -373,6 +389,7 @@ router.get('/payment-info', authenticate, asyncHandler(async (_req, res) => {
       binance_name: env.BINANCE_NAME || null,
     },
     minimums: { crypto_usd: 30, momo_ghs: 300, bank_ngn: 30000 },
+    first_deposit: { ghs_required: firstGhsDepositRequired, currency: 'GHS', amount: FIRST_GH_DEPOSIT_AMOUNT },
     quick_picks: {
       crypto_usd: [30, 50, 100, 200, 500],
       momo_ghs: [300, 500, 1000, 1500, 2000],
