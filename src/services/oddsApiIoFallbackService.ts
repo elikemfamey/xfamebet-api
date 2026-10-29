@@ -140,7 +140,7 @@ function priority(mapping: Mapping, popularApiIds: Set<number>): number {
 
 export async function ingestOddsApiIoLiveFallback(scores: LiveScore[], apiPricedEventIds: Set<string>): Promise<void> {
   if (!env.ODDS_API_IO_KEY) return;
-  // The primary worker runs every 30 seconds, but the free fallback is strictly
+  // The primary worker runs every 60 seconds, but the free fallback is strictly
   // capped to one global batch poll every four minutes across API instances.
   const pollLock = await redis.set('odds_api_io:live_poll_lock', '1', 'EX', 240, 'NX');
   if (pollLock !== 'OK') return;
@@ -223,7 +223,7 @@ export async function refreshOddsApiIoUpcomingFallback(): Promise<void> {
 
 export function isOddsApiIoLiveFresh(row: { source?: string | null; provider_updated_at?: string | null; updated_at?: string | null }): boolean {
   const updatedAt = row.provider_updated_at ?? row.updated_at;
-  const maxAge = row.source === 'odds_api_io_live' ? LIVE_MAX_AGE_MS : 45_000;
+  const maxAge = row.source === 'odds_api_io_live' ? LIVE_MAX_AGE_MS : 75_000;
   return Boolean(updatedAt) && Date.now() - new Date(updatedAt!).getTime() <= maxAge;
 }
 

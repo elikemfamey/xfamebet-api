@@ -109,7 +109,7 @@ export function startWorkers() {
     }
   });
 
-  // Claim due matches every five seconds. The status predicate makes this safe across workers.
+  // Claim due matches every 35 seconds. The status predicate makes this safe across workers.
   setInterval(async () => {
     try {
       const { data: due } = await supabase
@@ -139,7 +139,7 @@ export function startWorkers() {
     } catch (err) {
       logger.error('Match auto-start error', { err });
     }
-  }, 5_000);
+  }, 35_000);
 
   // Sportsbook/live data ingestion. Simulations are started only through admin routes.
 
@@ -155,21 +155,21 @@ export function startWorkers() {
     settlePendingBets().catch(err => logger.error('Football settlement worker error', { err }));
   });
 
-  // Fetch API-Football live scores every 30 seconds.
+  // Fetch API-Football live scores every 60 seconds.
   setInterval(async () => {
     try {
       await fetchLiveScores();
     } catch (err) {
       logger.error('Live scores worker error', { err });
     }
-  }, 30_000);
+  }, 60_000);
 
-  // Poll API-Football in-play odds every 30 seconds.
+  // Poll API-Football in-play odds every 60 seconds.
   setInterval(() => {
     fetchLiveOdds().catch((err: unknown) => logger.warn('Live odds worker error', {
       message: err instanceof Error ? err.message : String(err),
     }));
-  }, 30_000);
+  }, 60_000);
 
   // Run one immediate ingestion pass on startup (non-blocking)
   setImmediate(async () => {

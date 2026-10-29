@@ -7,7 +7,7 @@ import { broadcastOddsUpdate } from '../socket';
 import { getSportMonksFixtureId } from './liveFixtureIdentityService';
 
 const BASE_URL = 'https://api.sportmonks.com/v3/football';
-export const LIVE_ODDS_MAX_AGE_MS = 45_000;
+export const LIVE_ODDS_MAX_AGE_MS = 75_000;
 
 type SportMonksOdd = {
   fixture_id: number; label?: string; name?: string; value?: string | number;

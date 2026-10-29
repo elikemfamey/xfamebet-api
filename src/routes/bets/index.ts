@@ -113,7 +113,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
     // A canonical live event may only be accepted from a fresh verified in-play snapshot.
     if (sel.event_id.startsWith('live:football:') && oddsData.source !== 'estimate') {
       const updatedAt = oddsData.provider_updated_at ?? oddsData.updated_at;
-      const freshness = oddsData.source === 'odds_api_io_live' ? 4 * 60_000 : 45_000;
+      const freshness = oddsData.source === 'odds_api_io_live' ? 4 * 60_000 : 75_000;
       const verifiedSource = oddsData.source === 'api_football_live' || oddsData.source === 'odds_api_io_live';
       const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > freshness;
       if (!oddsData.is_live || stale || !verifiedSource) {
