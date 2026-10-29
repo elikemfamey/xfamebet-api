@@ -13,7 +13,6 @@ import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
 import { AffiliateService } from '../../services/affiliateService';
 import { MoolreApiError, MoolreService } from '../../services/moolreService';
-import { getMoolreMetadata, getMoolreRetryState, type MoolreMetadata } from '../../services/moolrePaymentState';
 import { logger } from '../../utils/logger';
 import {
   GLOBAL_PLATFORM_CONTROLS_ID,
@@ -37,6 +36,7 @@ const router = Router();
 /** Minimum amount per individual withdrawal request. */
 const WITHDRAWAL_MIN_AMOUNT: Record<string, number> = { NGN: 5000, GHS: 50, USD: 10 };
 const FIRST_GH_DEPOSIT_AMOUNT = 300;
+const MOOLRE_PROMPT_RETRY_DELAY_MS = 90_000;
 
 async function hasCompletedGhsDeposit(userId: string): Promise<boolean> {
   const { data, error } = await supabase
@@ -131,6 +131,30 @@ const MOOLRE_CHANNELS: Record<'mtn' | 'telecel' | 'airteltigo', string> = { mtn:
 const MOOLRE_PROVIDERS: Record<'mtn' | 'telecel' | 'airteltigo', 'momo_mtn' | 'momo_telecel' | 'momo_airteltigo'> = {
   mtn: 'momo_mtn', telecel: 'momo_telecel', airteltigo: 'momo_airteltigo',
 };
+
+type MoolreMetadata = Record<string, unknown>;
+
+function getMoolreMetadata(value: unknown): MoolreMetadata {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as MoolreMetadata : {};
+}
+
+export function getMoolreRetryState(
+  deposit: { created_at: string; metadata?: unknown },
+  now = Date.now(),
+) {
+  const metadata = getMoolreMetadata(deposit.metadata);
+  const requestedAtValue = typeof metadata.prompt_requested_at === 'string'
+    ? metadata.prompt_requested_at
+    : deposit.created_at;
+  const requestedAt = new Date(requestedAtValue).getTime();
+  const elapsed = Number.isFinite(requestedAt) ? Math.max(0, now - requestedAt) : 0;
+  const retryAlreadyUsed = typeof metadata.retry_reference === 'string' || typeof metadata.retry_of === 'string';
+  const retryAfterMs = retryAlreadyUsed ? 0 : Math.max(0, MOOLRE_PROMPT_RETRY_DELAY_MS - elapsed);
+  return {
+    retry_allowed: !retryAlreadyUsed && retryAfterMs === 0,
+    retry_after_seconds: Math.ceil(retryAfterMs / 1000),
+  };
+}
 
 function moolreResponseFields(result: { code?: string; message?: string | null }) {
   const promptRequested = result.code === 'TR099';
