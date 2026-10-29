@@ -2,6 +2,7 @@ services:
   - type: web
     name: xfamebet-api
     runtime: node
+    plan: free
     rootDir: .
     buildCommand: yarn install --frozen-lockfile && yarn build
     startCommand: yarn start
