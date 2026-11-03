@@ -9,11 +9,14 @@ import { estimateFootballMarkets } from './liveOddsRegulator';
 
 export const UPCOMING_ODDS_MAX_AGE_MS = 60 * 60 * 1000;
 const HEALTH_KEY = 'upcoming_football:provider_health';
-export const UPCOMING_FIXTURE_WINDOW_DAYS = 30;
-// API-Football publishes pre-match odds only up to 14 days before kickoff.
-// The fixture catalogue remains one month wide; later fixtures are visible
-// with estimated markets until verified prices become available.
-const UPCOMING_ODDS_WINDOW_DAYS = 14;
+// Keep the customer-facing catalogue useful without issuing a 30-request burst
+// every time Render restarts. Seven days covers normal pre-match use.
+export const UPCOMING_FIXTURE_WINDOW_DAYS = 7;
+// Verified prices are optional because fixtures can use server-side estimated
+// markets. Limit price requests so a large catalogue cannot exhaust quota.
+const UPCOMING_ODDS_WINDOW_DAYS = 2;
+const MAX_ODDS_PAGES_PER_DAY = 3;
+const INGESTION_LOCK_KEY = 'upcoming_football:ingestion_lock';
 
 type Mapping = { canonical_event_id: string; sportmonks_fixture_id?: number | null; api_football_fixture_id?: number | null; odds_api_event_id?: string | null; home_team: string; away_team: string; starts_at: string; competition_key: string; competition_name: string; country_name?: string | null };
 
@@ -76,37 +79,61 @@ async function ingestApiFootballUpcomingOdds() {
   // with estimated markets even when an upcoming match has no listed price.
   const dates = Array.from({ length: UPCOMING_FIXTURE_WINDOW_DAYS }, (_, index) =>
     new Date(Date.now() + index * 86_400_000).toISOString().slice(0, 10));
-  const fixtureResponses = await Promise.all(dates.map(date => axios.get('https://v3.football.api-sports.io/fixtures', {
-    params: { date }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000,
-  })));
-  const fixtures = fixtureResponses.flatMap(response => {
-    if (!Array.isArray(response.data?.response)) throw new Error('API-Football returned malformed upcoming fixtures');
-    return response.data.response;
-  });
-  for (const event of fixtures) {
-    const fixture = event.fixture; const home = event.teams?.home?.name; const away = event.teams?.away?.name;
-    if (!fixture?.id || !fixture.date || !home || !away || new Date(fixture.date).getTime() <= Date.now()) continue;
-    await upsertMapping({ api_football_fixture_id: fixture.id, home_team: home, away_team: away, starts_at: fixture.date, competition_key: `api-football:${event.league?.id ?? 'unknown'}`, competition_name: event.league?.name ?? 'Other Football', country_name: event.league?.country ?? null });
+  let fixtureCount = 0;
+  let successfulFixtureDays = 0;
+  // Sequential requests avoid the previous 30-call startup burst being
+  // throttled as a group and leaving the mapping table completely empty.
+  for (const date of dates) {
+    try {
+      const response = await axios.get('https://v3.football.api-sports.io/fixtures', {
+        params: { date }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000,
+      });
+      const providerErrors = response.data?.errors;
+      if (providerErrors && Object.keys(providerErrors).length) {
+        throw new Error(`API-Football rejected fixture request: ${JSON.stringify(providerErrors)}`);
+      }
+      const events = response.data?.response;
+      if (!Array.isArray(events)) throw new Error('API-Football returned malformed upcoming fixtures');
+      successfulFixtureDays += 1;
+      for (const event of events) {
+        const fixture = event.fixture; const home = event.teams?.home?.name; const away = event.teams?.away?.name;
+        if (!fixture?.id || !fixture.date || !home || !away || new Date(fixture.date).getTime() <= Date.now()) continue;
+        await upsertMapping({ api_football_fixture_id: fixture.id, home_team: home, away_team: away, starts_at: fixture.date, competition_key: `api-football:${event.league?.id ?? 'unknown'}`, competition_name: event.league?.name ?? 'Other Football', country_name: event.league?.country ?? null });
+        fixtureCount += 1;
+      }
+    } catch (error: any) {
+      logger.warn('[UpcomingFootball] Fixture day refresh failed', { date, message: error?.message ?? String(error) });
+    }
   }
+  if (!successfulFixtureDays) throw new Error('API-Football failed every upcoming fixture request');
 
   let pricedEvents = 0;
   for (const date of dates.slice(0, UPCOMING_ODDS_WINDOW_DAYS)) {
-    for (let page = 1; page <= 10; page++) {
-      const response = await axios.get('https://v3.football.api-sports.io/odds', { params: { date, page }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000 });
-      const events = response.data?.response;
-      if (!Array.isArray(events) || !events.length) break;
-      for (const event of events) {
-        const fixture = event.fixture; const home = event.teams?.home?.name; const away = event.teams?.away?.name;
-        if (!fixture?.id || !fixture.date || !home || !away) continue;
-        const odds = apiFootballOdds(event); if (!odds.length) continue;
-        const mapping = await upsertMapping({ api_football_fixture_id: fixture.id, home_team: home, away_team: away, starts_at: fixture.date, competition_key: `api-football:${event.league?.id ?? 'unknown'}`, competition_name: event.league?.name ?? 'Other Football', country_name: event.league?.country ?? null });
-        await writeSnapshot(mapping, 'api_football_upcoming', odds);
-        pricedEvents += 1;
+    for (let page = 1; page <= MAX_ODDS_PAGES_PER_DAY; page++) {
+      try {
+        const response = await axios.get('https://v3.football.api-sports.io/odds', { params: { date, page }, headers: { 'x-apisports-key': env.API_FOOTBALL_KEY }, timeout: 12_000 });
+        const providerErrors = response.data?.errors;
+        if (providerErrors && Object.keys(providerErrors).length) throw new Error(`API-Football rejected odds request: ${JSON.stringify(providerErrors)}`);
+        const events = response.data?.response;
+        if (!Array.isArray(events) || !events.length) break;
+        for (const event of events) {
+          const fixture = event.fixture; const home = event.teams?.home?.name; const away = event.teams?.away?.name;
+          if (!fixture?.id || !fixture.date || !home || !away) continue;
+          const odds = apiFootballOdds(event); if (!odds.length) continue;
+          const mapping = await upsertMapping({ api_football_fixture_id: fixture.id, home_team: home, away_team: away, starts_at: fixture.date, competition_key: `api-football:${event.league?.id ?? 'unknown'}`, competition_name: event.league?.name ?? 'Other Football', country_name: event.league?.country ?? null });
+          await writeSnapshot(mapping, 'api_football_upcoming', odds);
+          pricedEvents += 1;
+        }
+        if ((response.data?.paging?.current ?? page) >= (response.data?.paging?.total ?? page)) break;
+      } catch (error: any) {
+        // The catalogue is already persisted, so missing optional prices must
+        // not make upcoming matches disappear.
+        logger.warn('[UpcomingFootball] Optional odds refresh failed', { date, page, message: error?.message ?? String(error) });
+        break;
       }
-      if ((response.data?.paging?.current ?? page) >= (response.data?.paging?.total ?? page)) break;
     }
   }
-  logger.info('[UpcomingFootball] API-Football catalogue refreshed', { fixtures: fixtures.length, pricedEvents, days: UPCOMING_FIXTURE_WINDOW_DAYS });
+  logger.info('[UpcomingFootball] API-Football catalogue refreshed', { fixtures: fixtureCount, pricedEvents, successfulFixtureDays, days: UPCOMING_FIXTURE_WINDOW_DAYS });
 }
 
 export async function expireStaleUpcomingFootballOdds(): Promise<void> {
@@ -121,27 +148,32 @@ export async function expireStaleUpcomingFootballOdds(): Promise<void> {
 }
 
 export async function ingestUpcomingFootballOdds(): Promise<void> {
-  const startedAt = new Date().toISOString();
-  // The fallback uses persisted API-Football fixture mappings, so it does not
-  // need to wait for the potentially long 30-day primary catalogue refresh.
-  // Running it independently makes a restarted service useful immediately.
-  const fallbackRefresh = refreshOddsApiIoUpcomingFallback().catch((error: any) => {
-    logger.warn('[UpcomingFootball] Odds-API.io fallback refresh failed', { message: error?.message ?? String(error) });
-  });
+  const lock = await redis.set(INGESTION_LOCK_KEY, '1', 'EX', 30 * 60, 'NX');
+  if (lock !== 'OK') return;
   try {
-    await ingestApiFootballUpcomingOdds();
-    await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football', lastSuccessAt: startedAt, lastFailureAt: null, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
-  } catch (error: any) {
-    // Keep the last accepted API-Football snapshot through its one-hour
-    // freshness window; never overwrite it with another provider's data.
-    logger.warn('[UpcomingFootball] API-Football upcoming ingestion failed', { message: error.message });
-    const previous = await redis.get(HEALTH_KEY);
-    let lastSuccessAt: string | null = null;
-    try { lastSuccessAt = previous ? JSON.parse(previous).lastSuccessAt ?? null : null; } catch { /* ignore corrupt health metadata */ }
-    await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football_unavailable', lastSuccessAt, lastFailureAt: startedAt, lastFailure: error.message, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
+    const startedAt = new Date().toISOString();
+    // The fallback uses persisted API-Football fixture mappings and can run in
+    // parallel with the bounded primary catalogue refresh.
+    const fallbackRefresh = refreshOddsApiIoUpcomingFallback().catch((error: any) => {
+      logger.warn('[UpcomingFootball] Odds-API.io fallback refresh failed', { message: error?.message ?? String(error) });
+    });
+    try {
+      await ingestApiFootballUpcomingOdds();
+      await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football', lastSuccessAt: startedAt, lastFailureAt: null, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
+    } catch (error: any) {
+      // Keep the last accepted API-Football snapshot through its one-hour
+      // freshness window; never overwrite it with another provider's data.
+      logger.warn('[UpcomingFootball] API-Football upcoming ingestion failed', { message: error.message });
+      const previous = await redis.get(HEALTH_KEY);
+      let lastSuccessAt: string | null = null;
+      try { lastSuccessAt = previous ? JSON.parse(previous).lastSuccessAt ?? null : null; } catch { /* ignore corrupt health metadata */ }
+      await redis.set(HEALTH_KEY, JSON.stringify({ activeSource: 'api_football_unavailable', lastSuccessAt, lastFailureAt: startedAt, lastFailure: error.message, freshnessMs: UPCOMING_ODDS_MAX_AGE_MS }));
+    }
+    await fallbackRefresh;
+    await expireStaleUpcomingFootballOdds();
+  } finally {
+    await redis.del(INGESTION_LOCK_KEY);
   }
-  await fallbackRefresh;
-  await expireStaleUpcomingFootballOdds();
 }
 
 export async function getUpcomingFootballFixtures(liveFixtureIds: number[] = []) {
@@ -159,7 +191,7 @@ export async function getUpcomingFootballFixtures(liveFixtureIds: number[] = [])
     return [];
   }
   const ids = mappings.map(row => row.canonical_event_id);
-  // PostgREST encodes `IN (...)` values in the URL. A month of fixtures can
+  // PostgREST encodes `IN (...)` values in the URL. A busy fixture window can
   // exceed its URL limit, which previously failed silently and made every
   // upcoming card look locked even when active fallback odds existed.
   const oddsChunks: any[][] = [];

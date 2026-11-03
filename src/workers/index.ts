@@ -10,6 +10,7 @@ import { logger } from '../utils/logger';
 import { MoolreService } from '../services/moolreService';
 import { ingestUpcomingFootballOdds, expireStaleUpcomingFootballOdds } from '../services/upcomingFootballOddsService';
 import { settlePendingBets } from '../services/betSettlementService';
+import { ingestUpcomingBasketballOdds } from '../services/oddsIngestionService';
 
 async function fetchLiveScores(): Promise<void> {
   try {
@@ -147,6 +148,10 @@ export function startWorkers() {
   cron.schedule('0 */5 * * *', () => {
     ingestUpcomingFootballOdds().catch(err => logger.error('Upcoming football odds worker error', { err }));
   });
+  // NBA, EuroLeague and WNBA headline odds, bounded for a small provider plan.
+  cron.schedule('15 */6 * * *', () => {
+    ingestUpcomingBasketballOdds().catch(err => logger.error('Upcoming basketball odds worker error', { err }));
+  });
   // A five-hour refresh must not leave old prices bettable for the remaining gap.
   cron.schedule('0 * * * *', () => {
     expireStaleUpcomingFootballOdds().catch(err => logger.error('Upcoming football odds expiry error', { err }));
@@ -176,6 +181,7 @@ export function startWorkers() {
     // Start the small, customer-facing upcoming pipeline first. The older
     // live-score refresh may take longer and must not delay it.
     ingestUpcomingFootballOdds().catch(err => logger.error('Initial upcoming football ingestion error', { err }));
+    ingestUpcomingBasketballOdds().catch(err => logger.error('Initial upcoming basketball ingestion error', { err }));
     try {
       await fetchLiveScores();
       await fetchLiveOdds();

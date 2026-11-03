@@ -158,6 +158,8 @@ function buildOddsRows(
 const SPORTS_CACHE_KEY = 'odds_api:active_sports';
 const INVALID_KEY_RETRY_MS = 15 * 60 * 1000;
 let oddsApiDisabledUntil = 0;
+const BASKETBALL_KEYS = new Set(['basketball_nba', 'basketball_euroleague', 'basketball_wnba']);
+const BASKETBALL_INGESTION_LOCK = 'odds_api:basketball_ingestion_lock';
 
 export async function getActiveSports(): Promise<Array<{ key: string; sport: string; league: string }>> {
   if (Date.now() < oddsApiDisabledUntil) {
@@ -199,6 +201,7 @@ export async function getActiveSports(): Promise<Array<{ key: string; sport: str
 
 async function ingestOddsForSport(
   sportConfig: { key: string; sport: string; league: string },
+  requestOptions: { regions: string; markets: string } = { regions: 'eu,uk', markets: 'h2h,totals' },
 ): Promise<number> {
   try {
     const resp = await axios.get(
@@ -206,8 +209,8 @@ async function ingestOddsForSport(
       {
         params: {
           apiKey: env.ODDS_API_KEY,
-          regions: 'eu,uk',
-          markets: 'h2h,totals',
+          regions: requestOptions.regions,
+          markets: requestOptions.markets,
           oddsFormat: 'decimal',
           dateFormat: 'iso',
         },
@@ -302,4 +305,39 @@ export async function ingestAllOdds(): Promise<void> {
   }
 
   logger.info(`[OddsIngestion] Cycle complete — ${totalEvents} competitions, ${totalRows} total rows`);
+}
+
+/**
+ * Fetch headline basketball without enabling the legacy all-sports loop. The
+ * selected leagues and one-credit requests keep this usable on a small plan.
+ */
+export async function ingestUpcomingBasketballOdds(): Promise<void> {
+  if (!env.ODDS_API_KEY) {
+    logger.warn('[Basketball] ODDS_API_KEY not configured; upcoming refresh skipped');
+    return;
+  }
+  try {
+    const active = await getActiveSports();
+    const basketball = active.filter(item => item.sport === 'basketball' && BASKETBALL_KEYS.has(item.key));
+    if (!basketball.length) {
+      logger.warn('[Basketball] Provider returned no active supported basketball leagues');
+      return;
+    }
+    const lock = await redis.set(BASKETBALL_INGESTION_LOCK, '1', 'EX', 5 * 60 * 60, 'NX');
+    if (lock !== 'OK') return;
+    let rows = 0;
+    for (const competition of basketball) {
+      // One region and one market costs one provider credit per league.
+      rows += await ingestOddsForSport(competition, { regions: 'eu', markets: 'h2h' });
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    await supabase.from('odds_feed').delete().eq('source', 'odds_api').eq('sport', 'basketball')
+      .lt('starts_at', new Date(Date.now() - 6 * 60 * 60_000).toISOString());
+    logger.info('[Basketball] Upcoming catalogue refreshed', { competitions: basketball.length, rows });
+  } catch (error: any) {
+    logger.error('[Basketball] Upcoming refresh failed', { message: error?.message ?? String(error) });
+    // Failed cycles should retry on the next schedule rather than retain the
+    // five-hour success lock.
+    await redis.del(BASKETBALL_INGESTION_LOCK);
+  }
 }
