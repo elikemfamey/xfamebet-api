@@ -122,7 +122,7 @@ export async function settlePendingBets(): Promise<void> {
   // Only real football events use this provider-backed settlement.
   const { data: pendingBets, error } = await supabase
     .from('bets')
-    .select('id, user_id, stake, potential_payout, share_code, bet_selections(event_id, market_type, selection)')
+    .select('id, user_id, stake, potential_payout, share_code, bet_selections(id, event_id, market_type, selection, status)')
     .eq('status', 'pending');
 
   if (error) { logger.error('[Settlement] Failed to load pending bets', { message: error.message }); return; }
@@ -131,7 +131,7 @@ export async function settlePendingBets(): Promise<void> {
   // Simulations settle in their own engine; legacy/non-football bets are left
   // untouched until a dedicated settlement source is configured for them.
   const realBets = pendingBets.filter(bet =>
-    (bet.bet_selections as any[]).every((sel: any) =>
+    bet.bet_selections.length > 0 && (bet.bet_selections as any[]).every((sel: any) =>
       sel.event_id.startsWith('upcoming:football:') || sel.event_id.startsWith('live:football:')
     )
   );
@@ -159,53 +159,61 @@ export async function settlePendingBets(): Promise<void> {
         if (fixture && ['FT', 'AET', 'PEN'].includes(fixture.fixture?.status?.short)) {
           const homeTeam = mapping.home_team ?? fixture.teams?.home?.name;
           const awayTeam = mapping.away_team ?? fixture.teams?.away?.name;
-          if (homeTeam && awayTeam) score = { id: mapping.canonical_event_id, sport_key: 'football', home_team: homeTeam, away_team: awayTeam, completed: true, scores: [{ name: homeTeam, score: String(fixture.goals?.home ?? 0) }, { name: awayTeam, score: String(fixture.goals?.away ?? 0) }] };
+          const homeGoals = fixture.goals?.home;
+          const awayGoals = fixture.goals?.away;
+          if (homeTeam && awayTeam && Number.isInteger(homeGoals) && Number.isInteger(awayGoals)) {
+            score = { id: mapping.canonical_event_id, sport_key: 'football', home_team: homeTeam, away_team: awayTeam, completed: true, scores: [{ name: homeTeam, score: String(homeGoals) }, { name: awayTeam, score: String(awayGoals) }] };
+          }
         }
       } catch (err: any) { logger.warn('[Settlement] API-Football final-score fetch failed', { eventId: mapping.canonical_event_id, message: err.message }); }
     }
     if (score) { completedEvents.set(mapping.canonical_event_id, score); await redis.setex(cacheKey, 300, JSON.stringify(score)); }
   }
 
-  if (completedEvents.size === 0) return;
   logger.info(`[Settlement] ${completedEvents.size} completed events found`);
 
   // Settle each pending bet
   for (const bet of realBets) {
     const selections = bet.bet_selections as Array<{
+      id: string;
       event_id: string;
       market_type: string;
       selection: string;
+      status: string;
     }>;
 
-    let allWon = true;
-    let anyLost = false;
-    let allComplete = true;
-
-    for (const sel of selections) {
-      const event = completedEvents.get(sel.event_id);
-      if (!event) { allComplete = false; continue; }
-
-      const won = selectionWon(event, sel.market_type, sel.selection);
-      if (won === null) { allComplete = false; continue; } // unsupported market
-      if (!won) anyLost = true;
-      if (!won) allWon = false;
-    }
-
-    // Settle as lost immediately if any leg lost (even if others not done)
-    // Settle as won only when every leg is confirmed won
-    const shouldSettle = anyLost || (allWon && allComplete);
-    if (!shouldSettle) continue;
-
-    const outcome = anyLost ? 'lost' : 'won';
-
     try {
+      const outcomes: string[] = [];
+      for (const sel of selections) {
+        if (sel.status === 'won' || sel.status === 'lost') {
+          outcomes.push(sel.status);
+          continue;
+        }
+        const event = completedEvents.get(sel.event_id);
+        const won = event ? selectionWon(event, sel.market_type, sel.selection) : null;
+        if (won === null) {
+          outcomes.push('pending');
+          continue;
+        }
+        const status = won ? 'won' : 'lost';
+        const { error: selectionError } = await supabase.from('bet_selections').update({ status }).eq('id', sel.id);
+        if (selectionError) throw selectionError;
+        outcomes.push(status);
+      }
+
+      const anyLost = outcomes.includes('lost');
+      if (!anyLost && !outcomes.every(status => status === 'won')) continue;
+      const outcome = anyLost ? 'lost' : 'won';
       const updatePayload: Record<string, unknown> = {
         status: outcome,
         settled_at: new Date().toISOString(),
       };
       if (outcome === 'won') updatePayload.payout = bet.potential_payout;
 
-      await supabase.from('bets').update(updatePayload).eq('id', bet.id);
+      const { data: settledBet, error: updateError } = await supabase.from('bets')
+        .update(updatePayload).eq('id', bet.id).eq('status', 'pending').select('id').maybeSingle();
+      if (updateError) throw updateError;
+      if (!settledBet) continue;
 
       if (outcome === 'won') {
         await WalletService.credit(
