@@ -2,6 +2,8 @@
 
 The deposit page adds a Flutterwave tab for eligible Nigerian accounts when the API has a configured gateway. It uses the existing NGN 30,000 deposit minimum.
 
+This integration uses Flutterwave v3 hosted checkout. See the [checkout guide](https://developer.flutterwave.com/docs/collections-inflow/flutterwave-standard), [transaction verification guide](https://developer.flutterwave.com/docs/transaction-verification), and [v3 webhook guide](https://developer.flutterwave.com/docs/webhooks).
+
 ## Test checkout
 
 Set `FLUTTERWAVE_TEST_SECRET_KEY` in the API environment and run the API in development. Test checkout uses the Flutterwave test key and a short-lived Redis reference. Verification displays a test result without crediting a wallet.
