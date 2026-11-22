@@ -12,6 +12,7 @@ import { env } from '../../config/env';
 import { AdminLogService } from '../../services/adminLogService';
 import { AffiliateService } from '../../services/affiliateService';
 import { MoolreApiError, MoolreService } from '../../services/moolreService';
+import flutterwave, { flutterwaveLiveAvailable, flutterwaveTestAvailable, flutterwaveTestMinimum } from './flutterwave';
 import {
   GLOBAL_PLATFORM_CONTROLS_ID,
   WITHDRAWAL_REQUIREMENT_MIGRATION_REQUIRED,
@@ -29,6 +30,7 @@ const upload = multer({
 });
 
 const router = Router();
+router.use('/flutterwave', flutterwave);
 
 // ---------------------------------------------------------------------------
 /** Minimum amount per individual withdrawal request. */
@@ -356,6 +358,8 @@ router.get('/crypto-address', authenticate, asyncHandler(async (_req, res) => {
 // GET /payments/payment-info — company collection details for deposit page
 router.get('/payment-info', authenticate, asyncHandler(async (_req, res) => {
   return sendSuccess(res, {
+    flutterwave: flutterwaveLiveAvailable() ? { mode: 'live', minimum: flutterwaveTestMinimum }
+      : flutterwaveTestAvailable() ? { mode: 'test', minimum: flutterwaveTestMinimum } : null,
     momo: {
       network: env.COMPANY_MOMO_NETWORK,
       name: env.COMPANY_MOMO_NAME,
