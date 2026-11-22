@@ -46,7 +46,9 @@ const verifyInput = z.object({
 });
 
 async function hostedCheckout(key: string, reference: string, amount: number, email: string, test: boolean) {
-  const redirect = new URL('/wallet/deposit', env.FRONTEND_URL);
+  const returnOrigin = process.env.FLUTTERWAVE_RETURN_ORIGIN?.trim()
+    || env.FRONTEND_URL.split(',')[0].trim();
+  const redirect = new URL('/wallet/deposit', returnOrigin);
   if (!test && redirect.protocol !== 'https:') throw new Error('Flutterwave live checkout requires an HTTPS return URL');
   redirect.searchParams.set('flutterwave', test ? 'test' : 'live');
   const { data } = await axios.post(apiBase + '/payments', {

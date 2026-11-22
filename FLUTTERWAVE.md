@@ -11,7 +11,7 @@ Set `FLUTTERWAVE_TEST_SECRET_KEY` in the API environment and run the API in deve
 ## Live checkout
 
 1. Apply [the Flutterwave SQL migration](src/db/migrations/20261122_flutterwave_ngn.sql) to the intended Supabase database.
-2. Set `FLUTTERWAVE_SECRET_KEY` and `FLUTTERWAVE_WEBHOOK_HASH` in the API's secret configuration. Set `FRONTEND_URL` to the customer site’s HTTPS origin.
+2. Set `FLUTTERWAVE_SECRET_KEY` and `FLUTTERWAVE_WEBHOOK_HASH` in the API's secret configuration. Set `FLUTTERWAVE_RETURN_ORIGIN` to the customer site’s HTTPS origin. If this setting is empty, checkout uses the first origin in `FRONTEND_URL`.
 3. In Flutterwave, set the webhook URL to the API origin followed by `/api/payments/flutterwave/webhook`. Use the same secret hash and enable webhook retries.
 4. Set `FLUTTERWAVE_LIVE_ENABLED=true` on the API after the migration and webhook are ready.
 
