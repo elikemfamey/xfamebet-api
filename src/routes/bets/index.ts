@@ -98,6 +98,10 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
 
   // Validate odds still active
   for (const sel of selections) {
+    const rejectPrice = (error: string, odds?: number) => res.status(400).json({
+      success: false, error, code: odds === undefined ? 'MARKET_UNAVAILABLE' : 'ODDS_CHANGED',
+      data: { event_id: sel.event_id, market_type: sel.market_type, selection: sel.selection, odds },
+    });
     const { data: storedOdds } = await supabase
       .from('odds_feed').select('odds_value, status, is_live, provider_updated_at, updated_at, source')
       .eq('event_id', sel.event_id).eq('market_type', sel.market_type)
@@ -107,7 +111,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
     const oddsData = (storedOdds?.status === 'active' ? storedOdds : estimatedOdds) as CurrentOdds | null;
 
     if (!oddsData || oddsData.status !== 'active') {
-      return sendError(res, `Odds for ${sel.event_name} - ${sel.selection} are no longer available`, 400);
+      return rejectPrice(`Odds for ${sel.event_name} - ${sel.selection} are no longer available`);
     }
 
     // A canonical live event may only be accepted from a fresh verified in-play snapshot.
@@ -117,7 +121,7 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
       const verifiedSource = oddsData.source === 'api_football_live' || oddsData.source === 'odds_api_io_live';
       const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > freshness;
       if (!oddsData.is_live || stale || !verifiedSource) {
-        return sendError(res, `Live odds for ${sel.event_name} are temporarily suspended. Please try again.`, 400);
+        return rejectPrice(`Live odds for ${sel.event_name} are temporarily suspended. Please try again.`);
       }
     }
 
@@ -129,14 +133,14 @@ router.post('/place', betLimiter, validateBody(placeBetSchema), async (req, res)
       const stale = !updatedAt || Date.now() - new Date(updatedAt).getTime() > freshness;
       const verifiedSource = oddsData.source === 'api_football_upcoming' || oddsData.source === 'odds_api_io_upcoming';
       if (oddsData.is_live || stale || !verifiedSource) {
-        return sendError(res, `Upcoming odds for ${sel.event_name} are temporarily suspended. Please refresh.`, 400);
+        return rejectPrice(`Upcoming odds for ${sel.event_name} are temporarily suspended. Please refresh.`);
       }
     }
 
     // Validate odds haven't moved significantly (anti-latency betting)
     const oddsMovement = Math.abs(oddsData.odds_value - sel.odds) / sel.odds;
     if (oddsMovement > 0.1) {
-      return sendError(res, `Odds have changed for ${sel.event_name}. Please refresh.`, 400);
+      return rejectPrice(`Odds have changed for ${sel.event_name}. Please review the new price.`, Number(oddsData.odds_value));
     }
   }
 
