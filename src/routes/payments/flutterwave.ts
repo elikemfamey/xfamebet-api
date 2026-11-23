@@ -57,11 +57,29 @@ const verifyInput = z.object({
   transaction_id: z.string().regex(/^[1-9]\d{0,17}$/),
 });
 
+class CheckoutConfigError extends Error {
+  constructor(readonly reason: 'invalid_return_origin' | 'invalid_hosted_link') {
+    super(reason);
+  }
+}
+
+function reportCheckoutFailure(error: unknown, reference: string, mode: 'live' | 'test') {
+  const providerStatus = axios.isAxiosError(error) ? error.response?.status : undefined;
+  const reason = error instanceof CheckoutConfigError ? error.reason
+    : providerStatus === 401 || providerStatus === 403 ? 'provider_authorization'
+    : providerStatus ? 'provider_response'
+    : axios.isAxiosError(error) ? 'provider_connection' : 'unexpected';
+  logger.warn('Flutterwave checkout failed', { mode, reference, reason, providerStatus });
+  return 'Could not open Flutterwave checkout. Reference: ' + reference;
+}
+
 async function hostedCheckout(key: string, reference: string, amount: number, email: string, test: boolean) {
   const returnOrigin = process.env.FLUTTERWAVE_RETURN_ORIGIN?.trim()
     || env.FRONTEND_URL.split(',')[0].trim();
-  const redirect = new URL('/wallet/deposit', returnOrigin);
-  if (!test && redirect.protocol !== 'https:') throw new Error('Flutterwave live checkout requires an HTTPS return URL');
+  let redirect: URL;
+  try { redirect = new URL('/wallet/deposit', returnOrigin); }
+  catch { throw new CheckoutConfigError('invalid_return_origin'); }
+  if (!test && redirect.protocol !== 'https:') throw new CheckoutConfigError('invalid_return_origin');
   redirect.searchParams.set('flutterwave', test ? 'test' : 'live');
   const { data } = await axios.post(apiBase + '/payments', {
     tx_ref: reference,
@@ -72,9 +90,11 @@ async function hostedCheckout(key: string, reference: string, amount: number, em
     customizations: { title: test ? 'Xfamebet test deposit' : 'Xfamebet NGN deposit' },
     configurations: { session_duration: 15 },
   }, { headers: { Authorization: 'Bearer ' + key }, timeout: 15000, maxRedirects: 0 });
-  const checkout = new URL(data?.data?.link);
+  let checkout: URL;
+  try { checkout = new URL(data?.data?.link); }
+  catch { throw new CheckoutConfigError('invalid_hosted_link'); }
   if (data.status !== 'success' || checkout.origin !== 'https://checkout.flutterwave.com' || checkout.username || checkout.password) {
-    throw new Error('Unexpected hosted checkout URL');
+    throw new CheckoutConfigError('invalid_hosted_link');
   }
   return checkout.href;
 }
@@ -93,9 +113,9 @@ flutterwave.post('/test/checkout', authenticate, paymentLimiter, validateBody(ch
   await redis.set(intentKey, JSON.stringify({ userId, amount }), 'EX', 3600);
   try {
     return sendSuccess(res, { checkout_url: await hostedCheckout(key, reference, amount, email, true) }, 201);
-  } catch {
+  } catch (error) {
     await redis.del(intentKey).catch(() => {});
-    return sendError(res, 'Could not open Flutterwave test checkout', 502);
+    return sendError(res, reportCheckoutFailure(error, reference, 'test'), 502);
   }
 }));
 
@@ -121,8 +141,8 @@ flutterwave.post('/checkout', authenticate, paymentLimiter, validateBody(checkou
   if (error) return sendError(res, 'Flutterwave checkout is temporarily unavailable', 503);
   try {
     return sendSuccess(res, { checkout_url: await hostedCheckout(key, reference, amount, email, false) }, 201);
-  } catch {
-    return sendError(res, 'Could not open Flutterwave checkout', 502);
+  } catch (error) {
+    return sendError(res, reportCheckoutFailure(error, reference, 'live'), 502);
   }
 }));
 
