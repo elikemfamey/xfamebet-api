@@ -9,6 +9,7 @@ import { authenticate } from '../../middleware/auth';
 import { paymentLimiter } from '../../middleware/rateLimiter';
 import { validateBody } from '../../middleware/validate';
 import { asyncHandler, sendError, sendSuccess } from '../../utils/response';
+import { logger } from '../../utils/logger';
 import { broadcastWalletUpdate } from '../../socket';
 
 const flutterwave = Router();
@@ -27,12 +28,23 @@ export function flutterwaveTestAvailable() {
 
 function liveKey() {
   const key = process.env.FLUTTERWAVE_SECRET_KEY?.trim();
-  return process.env.FLUTTERWAVE_LIVE_ENABLED === 'true' && key?.startsWith('FLWSECK-') &&
+  return process.env.FLUTTERWAVE_LIVE_ENABLED?.trim() === 'true' && key?.startsWith('FLWSECK-') &&
     process.env.FLUTTERWAVE_WEBHOOK_HASH?.trim() ? key : undefined;
 }
 
 export function flutterwaveLiveAvailable() {
   return Boolean(liveKey());
+}
+
+if (env.NODE_ENV === 'production') {
+  const key = process.env.FLUTTERWAVE_SECRET_KEY?.trim();
+  logger.info('Flutterwave live configuration', {
+    liveCheckoutAvailable: flutterwaveLiveAvailable(),
+    liveFlagEnabled: process.env.FLUTTERWAVE_LIVE_ENABLED?.trim() === 'true',
+    secretKeyConfigured: Boolean(key),
+    secretKeyHasV3LivePrefix: Boolean(key?.startsWith('FLWSECK-')),
+    webhookHashConfigured: Boolean(process.env.FLUTTERWAVE_WEBHOOK_HASH?.trim()),
+  });
 }
 
 const checkoutInput = z.object({
