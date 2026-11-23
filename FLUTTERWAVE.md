@@ -6,7 +6,7 @@ This integration uses Flutterwave v3 hosted checkout. See the [checkout guide](h
 
 ## Test checkout
 
-Set `FLUTTERWAVE_TEST_SECRET_KEY` in the API environment and run the API in development. Test checkout uses the Flutterwave test key and a short-lived Redis reference. Verification displays a test result without crediting a wallet.
+Set `FLUTTERWAVE_TEST_SECRET_KEY` in the API environment. On a deployed API running in production mode, also set `FLUTTERWAVE_TEST_ENABLED=true` and keep `FLUTTERWAVE_LIVE_ENABLED=false` to show **Flutterwave (test)** to Nigerian accounts. Set `FLUTTERWAVE_RETURN_ORIGIN=https://primewin.site` when testing from Primewin. Test checkout uses the Flutterwave test key and a short-lived Redis reference. Verification displays a test result without crediting a wallet.
 
 ## Live checkout
 

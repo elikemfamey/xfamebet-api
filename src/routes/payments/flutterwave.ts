@@ -22,7 +22,7 @@ function testKey() {
 }
 
 export function flutterwaveTestAvailable() {
-  return env.NODE_ENV !== 'production' && Boolean(testKey());
+  return Boolean(testKey()) && (env.NODE_ENV !== 'production' || process.env.FLUTTERWAVE_TEST_ENABLED === 'true');
 }
 
 function liveKey() {
