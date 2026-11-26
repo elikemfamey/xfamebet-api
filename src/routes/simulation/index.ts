@@ -7,6 +7,7 @@ import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { SimulationEngine } from '../../services/simulationEngine';
 import { ScriptedMatchEngine } from '../../services/scriptedMatchEngine';
+import { placeStagingSimulationStake, stagingSimulationStakeEnabled } from '../../services/stagingSimulationStake';
 import { getIO, broadcastOddsUpdate } from '../../socket';
 
 async function bustLiveFeedCache(sport?: string) {
@@ -209,8 +210,9 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
   const { data: country } = await supabase.from('countries').select('code').eq('code', body.country_code).single();
   if (!country) return sendError(res, 'Select a valid country', 400);
 
+  const stagingStake = stagingSimulationStakeEnabled();
   const scheduledAt = body.scheduled_at === 'now'
-    ? new Date().toISOString()
+    ? new Date(Date.now() + (stagingStake ? 120_000 : 0)).toISOString()
     : body.scheduled_at;
 
   const baseInsert: Record<string, unknown> = {
@@ -276,20 +278,28 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
     });
   }
 
+  const testStake = stagingStake
+    ? await placeStagingSimulationStake(data.id).catch((error: unknown) => ({
+        status: 'failed' as const,
+        message: error instanceof Error ? error.message : 'Could not place staging stake',
+      }))
+    : null;
+  const createdMatch = testStake ? { ...data, test_stake: testStake } : data;
+
   // "Now" must not wait for the scheduler. Claim the scheduled row before starting.
   if (body.scheduled_at === 'now') {
     const { data: claimed } = await supabase.from('simulated_matches')
-      .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null })
+      .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null, scheduled_at: new Date().toISOString() })
       .eq('id', data.id).eq('status', 'scheduled').select('id').single();
     if (claimed) {
       await ScriptedMatchEngine.startMatch(data.id);
       try { getIO().emit('simulation:live', { matchId: data.id, status: 'live', sport: data.sport }); } catch {}
       await bustLiveFeedCache(data.sport);
-      return sendSuccess(res, { ...data, status: 'live', started_at: new Date().toISOString() }, 201);
+      return sendSuccess(res, { ...createdMatch, status: 'live', started_at: new Date().toISOString() }, 201);
     }
   }
 
-  return sendSuccess(res, data, 201);
+  return sendSuccess(res, createdMatch, 201);
 });
 
 // Match alert preferences for the live-match modal.
