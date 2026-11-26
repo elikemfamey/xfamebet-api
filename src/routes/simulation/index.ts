@@ -25,7 +25,7 @@ function engine(isScripted: boolean) {
 }
 
 // Strip admin-only fields before sending match data to regular users
-const ADMIN_FIELDS = ['is_scripted', 'script_events', 'script_stats', 'is_admin_created', 'created_by'] as const;
+const ADMIN_FIELDS = ['is_scripted', 'script_events', 'script_stats', 'is_admin_created', 'created_by', 'declared_result'] as const;
 function redact(row: Record<string, unknown>): Record<string, unknown> {
   const clean = { ...row };
   for (const key of ADMIN_FIELDS) delete clean[key];
@@ -318,12 +318,15 @@ router.put('/:id/alerts', authenticate, validateBody(z.object({
 router.patch('/admin/:id/edit', authenticate, requireAdmin, validateBody(editSchema), async (req, res) => {
   const { id } = req.params;
 
-  const { data: match } = await supabase.from('simulated_matches').select('status').eq('id', id).single();
+  const { data: match } = await supabase.from('simulated_matches').select('status, started_at').eq('id', id).single();
   if (!match) return sendError(res, 'Match not found', 404);
-  if (match.status !== 'scheduled') return sendError(res, 'Only scheduled matches can be edited', 400);
+  if (match.status !== 'scheduled' || match.started_at) return sendError(res, 'Only matches that have not started can be edited', 409);
 
   const updates: Record<string, unknown> = {};
   const b = req.body;
+  if (b.scheduled_at !== undefined && Date.parse(b.scheduled_at) <= Date.now()) {
+    return sendError(res, 'Choose a start time in the future', 400);
+  }
   if (b.team_a !== undefined)            updates.team_a = b.team_a;
   if (b.team_b !== undefined)            updates.team_b = b.team_b;
   if (b.home_logo !== undefined)         updates.home_logo = b.home_logo;
@@ -341,8 +344,9 @@ router.patch('/admin/:id/edit', authenticate, requireAdmin, validateBody(editSch
   if (b.declared_result !== undefined)   updates.declared_result = b.declared_result;
 
   const { data, error } = await supabase.from('simulated_matches')
-    .update(updates).eq('id', id).select().single();
+    .update(updates).eq('id', id).eq('status', 'scheduled').is('started_at', null).select().maybeSingle();
   if (error) return sendError(res, error.message, 500);
+  if (!data) return sendError(res, 'Match has already started', 409);
 
   // Re-generate odds if any odds field changed
   const oddsChanged = b.initial_home_odds !== undefined || b.initial_draw_odds !== undefined

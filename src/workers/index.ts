@@ -113,16 +113,17 @@ export function startWorkers() {
   // Claim due matches every 35 seconds. The status predicate makes this safe across workers.
   setInterval(async () => {
     try {
+      const cutoff = new Date().toISOString();
       const { data: due } = await supabase
         .from('simulated_matches')
         .select('id, is_scripted, sport')
         .eq('status', 'scheduled')
-        .lte('scheduled_at', new Date().toISOString());
+        .lte('scheduled_at', cutoff);
 
       for (const match of due ?? []) {
         const { data: claimed } = await supabase.from('simulated_matches')
           .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null })
-          .eq('id', match.id).eq('status', 'scheduled').select('id').single();
+          .eq('id', match.id).eq('status', 'scheduled').lte('scheduled_at', cutoff).select('id').single();
         if (!claimed) continue;
         const isScripted = (match as any).is_scripted;
         if (isScripted) {
