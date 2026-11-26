@@ -805,7 +805,6 @@ export class ScriptedMatchEngine {
     const league = (match as any).competition ?? match.league_name ?? 'PrimeWin League';
     const sport  = match.sport ?? 'football';
     const startsAt = match.scheduled_at ?? new Date().toISOString();
-    const markets: string[] = (match as any).markets ?? ['match_winner', 'over_under', 'btts'];
 
     const base = {
       event_id:   `sim:${matchId}`,
@@ -819,60 +818,66 @@ export class ScriptedMatchEngine {
       updated_at: new Date().toISOString(),
     };
 
-    const ftsHome = parseFloat((home * 0.85).toFixed(2));
-    const ftsAway = parseFloat((away * 0.85).toFixed(2));
+    const rows = this.initialOdds(home, draw, away, overrides?.correctScoreOdds)
+      .map(row => ({ ...base, ...row }));
+    await supabase.from('odds_feed').upsert(rows, { onConflict: 'event_id,market_type,selection' });
+  }
+
+  static initialOdds(home: number, draw: number, away: number, correctScoreOdds?: Record<string, number>) {
+    const ftsHome = Math.max(1.01, parseFloat((home * 0.85).toFixed(2)));
+    const ftsAway = Math.max(1.01, parseFloat((away * 0.85).toFixed(2)));
     const htHome  = parseFloat((home * 0.95 + 0.5).toFixed(2));
     const htAway  = parseFloat((away * 0.95 + 0.5).toFixed(2));
 
-    const rows: object[] = [
+    return [
       // Match winner
-      { ...base, market_type: 'match_winner',       selection: 'home',          odds_value: +home.toFixed(2) },
-      { ...base, market_type: 'match_winner',       selection: 'draw',          odds_value: +draw.toFixed(2) },
-      { ...base, market_type: 'match_winner',       selection: 'away',          odds_value: +away.toFixed(2) },
+      { market_type: 'match_winner',       selection: 'home',          odds_value: +home.toFixed(2) },
+      { market_type: 'match_winner',       selection: 'draw',          odds_value: +draw.toFixed(2) },
+      { market_type: 'match_winner',       selection: 'away',          odds_value: +away.toFixed(2) },
       // Over/Under
-      { ...base, market_type: 'over_under',         selection: 'over_1.5',      odds_value: 1.30 },
-      { ...base, market_type: 'over_under',         selection: 'under_1.5',     odds_value: 3.00 },
-      { ...base, market_type: 'over_under',         selection: 'over_2.5',      odds_value: 1.85 },
-      { ...base, market_type: 'over_under',         selection: 'under_2.5',     odds_value: 1.95 },
-      { ...base, market_type: 'over_under',         selection: 'over_3.5',      odds_value: 2.50 },
-      { ...base, market_type: 'over_under',         selection: 'under_3.5',     odds_value: 1.55 },
+      { market_type: 'over_under',         selection: 'over_1.5',      odds_value: 1.30 },
+      { market_type: 'over_under',         selection: 'under_1.5',     odds_value: 3.00 },
+      { market_type: 'over_under',         selection: 'over_2.5',      odds_value: 1.85 },
+      { market_type: 'over_under',         selection: 'under_2.5',     odds_value: 1.95 },
+      { market_type: 'over_under',         selection: 'over_3.5',      odds_value: 2.50 },
+      { market_type: 'over_under',         selection: 'under_3.5',     odds_value: 1.55 },
       // Both teams to score
-      { ...base, market_type: 'btts',               selection: 'yes',           odds_value: 1.75 },
-      { ...base, market_type: 'btts',               selection: 'no',            odds_value: 2.05 },
+      { market_type: 'btts',               selection: 'yes',           odds_value: 1.75 },
+      { market_type: 'btts',               selection: 'no',            odds_value: 2.05 },
       // First team to score
-      { ...base, market_type: 'first_team_to_score', selection: 'home',         odds_value: ftsHome },
-      { ...base, market_type: 'first_team_to_score', selection: 'away',         odds_value: ftsAway },
-      { ...base, market_type: 'first_team_to_score', selection: 'no_goal',      odds_value: 8.00 },
+      { market_type: 'first_team_to_score', selection: 'home',         odds_value: ftsHome },
+      { market_type: 'first_team_to_score', selection: 'away',         odds_value: ftsAway },
+      { market_type: 'first_team_to_score', selection: 'no_goal',      odds_value: 8.00 },
       // Half-time result
-      { ...base, market_type: 'half_time_result',   selection: 'home',          odds_value: htHome },
-      { ...base, market_type: 'half_time_result',   selection: 'draw',          odds_value: 2.80 },
-      { ...base, market_type: 'half_time_result',   selection: 'away',          odds_value: htAway },
+      { market_type: 'half_time_result',   selection: 'home',          odds_value: htHome },
+      { market_type: 'half_time_result',   selection: 'draw',          odds_value: 2.80 },
+      { market_type: 'half_time_result',   selection: 'away',          odds_value: htAway },
       // Double chance
-      { ...base, market_type: 'double_chance',      selection: 'home_or_draw',  odds_value: parseFloat(Math.max(1.10, home * 0.55).toFixed(2)) },
-      { ...base, market_type: 'double_chance',      selection: 'away_or_draw',  odds_value: parseFloat(Math.max(1.10, away * 0.55).toFixed(2)) },
-      { ...base, market_type: 'double_chance',      selection: 'home_or_away',  odds_value: 1.25 },
+      { market_type: 'double_chance',      selection: 'home_or_draw',  odds_value: parseFloat(Math.max(1.10, home * 0.55).toFixed(2)) },
+      { market_type: 'double_chance',      selection: 'away_or_draw',  odds_value: parseFloat(Math.max(1.10, away * 0.55).toFixed(2)) },
+      { market_type: 'double_chance',      selection: 'home_or_away',  odds_value: 1.25 },
       // Anytime scorer
-      { ...base, market_type: 'anytime_score_home', selection: 'yes',           odds_value: 1.40 },
-      { ...base, market_type: 'anytime_score_home', selection: 'no',            odds_value: 2.75 },
-      { ...base, market_type: 'anytime_score_away', selection: 'yes',           odds_value: 1.45 },
-      { ...base, market_type: 'anytime_score_away', selection: 'no',            odds_value: 2.65 },
+      { market_type: 'anytime_score_home', selection: 'yes',           odds_value: 1.40 },
+      { market_type: 'anytime_score_home', selection: 'no',            odds_value: 2.75 },
+      { market_type: 'anytime_score_away', selection: 'yes',           odds_value: 1.45 },
+      { market_type: 'anytime_score_away', selection: 'no',            odds_value: 2.65 },
       // Clean sheet
-      { ...base, market_type: 'clean_sheet_home',   selection: 'yes',           odds_value: 2.30 },
-      { ...base, market_type: 'clean_sheet_home',   selection: 'no',            odds_value: 1.60 },
-      { ...base, market_type: 'clean_sheet_away',   selection: 'yes',           odds_value: 2.50 },
-      { ...base, market_type: 'clean_sheet_away',   selection: 'no',            odds_value: 1.55 },
+      { market_type: 'clean_sheet_home',   selection: 'yes',           odds_value: 2.30 },
+      { market_type: 'clean_sheet_home',   selection: 'no',            odds_value: 1.60 },
+      { market_type: 'clean_sheet_away',   selection: 'yes',           odds_value: 2.50 },
+      { market_type: 'clean_sheet_away',   selection: 'no',            odds_value: 1.55 },
       // Total goals exact band
-      { ...base, market_type: 'total_goals_exact',  selection: '0_1',           odds_value: 3.20 },
-      { ...base, market_type: 'total_goals_exact',  selection: '2_3',           odds_value: 1.70 },
-      { ...base, market_type: 'total_goals_exact',  selection: '4plus',         odds_value: 3.50 },
+      { market_type: 'total_goals_exact',  selection: '0_1',           odds_value: 3.20 },
+      { market_type: 'total_goals_exact',  selection: '2_3',           odds_value: 1.70 },
+      { market_type: 'total_goals_exact',  selection: '4plus',         odds_value: 3.50 },
       // Corners
-      { ...base, market_type: 'corners',            selection: 'over_9.5',      odds_value: 1.85 },
-      { ...base, market_type: 'corners',            selection: 'under_9.5',     odds_value: 1.95 },
+      { market_type: 'corners',            selection: 'over_9.5',      odds_value: 1.85 },
+      { market_type: 'corners',            selection: 'under_9.5',     odds_value: 1.95 },
       // Cards
-      { ...base, market_type: 'cards',              selection: 'over_3.5',      odds_value: 1.90 },
-      { ...base, market_type: 'cards',              selection: 'under_3.5',     odds_value: 1.90 },
+      { market_type: 'cards',              selection: 'over_3.5',      odds_value: 1.90 },
+      { market_type: 'cards',              selection: 'under_3.5',     odds_value: 1.90 },
       // Correct score (inserted only when admin provides custom odds for this market)
-      ...(overrides?.correctScoreOdds !== undefined
+      ...(correctScoreOdds !== undefined
         ? Object.entries({
             '0-0': 7.00, '1-0': 5.50, '0-1': 7.00, '1-1': 5.00,
             '2-0': 8.00, '0-2': 10.00, '2-1': 7.00, '1-2': 9.00,
@@ -880,9 +885,8 @@ export class ScriptedMatchEngine {
             '1-3': 16.00, '3-2': 20.00, '2-3': 25.00, '3-3': 35.00,
             '4-0': 30.00, '0-4': 40.00, '4-1': 35.00, '1-4': 45.00,
             '4-2': 45.00, '2-4': 55.00, 'other': 60.00,
-            ...overrides.correctScoreOdds,
+            ...correctScoreOdds,
           }).map(([score, odds]) => ({
-            ...base,
             market_type: 'correct_score',
             selection: score,
             odds_value: odds as number,
@@ -890,6 +894,5 @@ export class ScriptedMatchEngine {
         : []),
     ];
 
-    await supabase.from('odds_feed').upsert(rows, { onConflict: 'event_id,market_type,selection' });
   }
 }

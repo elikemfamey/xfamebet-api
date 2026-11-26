@@ -1,13 +1,12 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { supabase } from '../../config/supabase';
-import { redis } from '../../config/redis';
+import { redis, REDIS_KEYS } from '../../config/redis';
 import { authenticate, requireAdmin } from '../../middleware/auth';
 import { validateBody } from '../../middleware/validate';
 import { sendSuccess, sendError, sendPaginated } from '../../utils/response';
 import { SimulationEngine } from '../../services/simulationEngine';
 import { ScriptedMatchEngine } from '../../services/scriptedMatchEngine';
-import { placeStagingSimulationStake, stagingSimulationStakeEnabled } from '../../services/stagingSimulationStake';
 import { getIO, broadcastOddsUpdate } from '../../socket';
 
 async function bustLiveFeedCache(sport?: string) {
@@ -173,6 +172,7 @@ const createSchema = z.object({
 
   // Scheduling — use 'now' to start immediately or an ISO datetime string
   scheduled_at: z.enum(['now']).or(z.string().datetime()).default('now'),
+  defer_start: z.boolean().default(false),
 
   // Scripted match
   is_scripted:     z.boolean().default(false),
@@ -201,6 +201,22 @@ const editSchema = z.object({
   declared_result:      z.enum(['home', 'draw', 'away']).optional(),
 });
 
+const initialMarketsSchema = createSchema.pick({
+  markets: true,
+  initial_home_odds: true,
+  initial_draw_odds: true,
+  initial_away_odds: true,
+  correct_score_odds: true,
+});
+
+router.post('/admin/initial-markets', authenticate, requireAdmin, validateBody(initialMarketsSchema), (req, res) => {
+  const { markets, initial_home_odds = 1.90, initial_draw_odds = 3.20, initial_away_odds = 1.90,
+    correct_score_odds } = req.body as z.infer<typeof initialMarketsSchema>;
+  const options = ScriptedMatchEngine.initialOdds(initial_home_odds, initial_draw_odds, initial_away_odds,
+    markets.includes('correct_score') ? correct_score_odds ?? {} : undefined);
+  return sendSuccess(res, options.filter(row => markets.includes(row.market_type) && row.odds_value <= 1000));
+});
+
 // ── Admin: create ─────────────────────────────────────────────────────────────
 
 router.post('/admin/create', authenticate, requireAdmin, validateBody(createSchema), async (req, res) => {
@@ -210,9 +226,14 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
   const { data: country } = await supabase.from('countries').select('code').eq('code', body.country_code).single();
   if (!country) return sendError(res, 'Select a valid country', 400);
 
-  const stagingStake = stagingSimulationStakeEnabled();
+  if (body.scheduled_at !== 'now' && Date.parse(body.scheduled_at) <= Date.now()) {
+    return sendError(res, 'Choose a start time in the future', 400);
+  }
+  if (body.script_events.some((event: { minute: number }) => event.minute > body.duration_minutes)) {
+    return sendError(res, 'Set each scripted event within the match duration', 400);
+  }
   const scheduledAt = body.scheduled_at === 'now'
-    ? new Date(Date.now() + (stagingStake ? 120_000 : 0)).toISOString()
+    ? new Date(Date.now() + (body.defer_start ? 120_000 : 0)).toISOString()
     : body.scheduled_at;
 
   const baseInsert: Record<string, unknown> = {
@@ -261,8 +282,8 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
   const { data, error } = insertResult;
   if (error) return sendError(res, error.message, 500);
 
-  // Generate initial odds
-  if (true) {
+  // Publish the initial odds before starting the match.
+  if (data.is_scripted) {
     await ScriptedMatchEngine.generateOdds(data.id, {
       homeOdds: body.initial_home_odds,
       drawOdds: body.initial_draw_odds,
@@ -278,28 +299,20 @@ router.post('/admin/create', authenticate, requireAdmin, validateBody(createSche
     });
   }
 
-  const testStake = stagingStake
-    ? await placeStagingSimulationStake(data.id).catch((error: unknown) => ({
-        status: 'failed' as const,
-        message: error instanceof Error ? error.message : 'Could not place staging stake',
-      }))
-    : null;
-  const createdMatch = testStake ? { ...data, test_stake: testStake } : data;
-
-  // "Now" must not wait for the scheduler. Claim the scheduled row before starting.
-  if (body.scheduled_at === 'now') {
+  // When a stake is requested, the admin form starts the match after the bet request.
+  if (body.scheduled_at === 'now' && !body.defer_start) {
     const { data: claimed } = await supabase.from('simulated_matches')
       .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null, scheduled_at: new Date().toISOString() })
       .eq('id', data.id).eq('status', 'scheduled').select('id').single();
     if (claimed) {
-      await ScriptedMatchEngine.startMatch(data.id);
+      await engine(Boolean(data.is_scripted)).startMatch(data.id);
       try { getIO().emit('simulation:live', { matchId: data.id, status: 'live', sport: data.sport }); } catch {}
       await bustLiveFeedCache(data.sport);
-      return sendSuccess(res, { ...createdMatch, status: 'live', started_at: new Date().toISOString() }, 201);
+      return sendSuccess(res, { ...data, status: 'live', started_at: new Date().toISOString() }, 201);
     }
   }
 
-  return sendSuccess(res, createdMatch, 201);
+  return sendSuccess(res, data, 201);
 });
 
 // Match alert preferences for the live-match modal.
@@ -358,6 +371,18 @@ router.patch('/admin/:id/edit', authenticate, requireAdmin, validateBody(editSch
   if (error) return sendError(res, error.message, 500);
   if (!data) return sendError(res, 'Match has already started', 409);
 
+  if (b.scheduled_at !== undefined) {
+    const eventId = `sim:${id}`;
+    const { error: oddsError } = await supabase.from('odds_feed')
+      .update({ starts_at: data.scheduled_at })
+      .eq('event_id', eventId).eq('source', 'simulation');
+    if (oddsError) return sendError(res, 'Start time saved, but sportsbook odds could not be updated', 500);
+    await Promise.all([
+      redis.del(REDIS_KEYS.ALL_ODDS, REDIS_KEYS.LIVE_ODDS(eventId)),
+      bustLiveFeedCache(data.sport),
+    ]);
+  }
+
   // Re-generate odds if any odds field changed
   const oddsChanged = b.initial_home_odds !== undefined || b.initial_draw_odds !== undefined
     || b.initial_away_odds !== undefined || b.correct_score_odds !== undefined;
@@ -391,13 +416,18 @@ router.post('/admin/:id/start', authenticate, requireAdmin, async (req, res) => 
   if (!match) return sendError(res, 'Match not found', 404);
   if (!['scheduled', 'paused'].includes(match.status)) return sendError(res, 'Match cannot be started', 400);
 
-  await supabase.from('simulated_matches')
-    .update({ status: 'live', started_at: new Date().toISOString(), paused_at: null })
-    .eq('id', id);
+  const startedAt = new Date().toISOString();
+  const { data: claimed, error: claimError } = await supabase.from('simulated_matches')
+    .update({ status: 'live', started_at: startedAt, paused_at: null,
+      ...(match.status === 'scheduled' ? { scheduled_at: startedAt } : {}),
+    })
+    .eq('id', id).eq('status', match.status).select('id').maybeSingle();
+  if (claimError) return sendError(res, claimError.message, 500);
+  if (!claimed) return sendError(res, 'Match status changed', 409);
 
   // Ensure any accidentally-suspended odds are cleared before the match goes live
   await supabase.from('odds_feed')
-    .update({ status: 'active' })
+    .update({ status: 'active', ...(match.status === 'scheduled' ? { starts_at: startedAt } : {}) })
     .eq('event_id', `sim:${id}`)
     .eq('source', 'simulation');
 
