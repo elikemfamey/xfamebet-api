@@ -257,6 +257,35 @@ router.get('/live', async (req, res) => {
   return sendSuccess(res, data ?? []);
 });
 
+// GET /bets/recent-wins
+router.get('/recent-wins', async (req, res) => {
+  const userId = req.user!.id;
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data: wins, error } = await supabase.from('bets')
+    .select('id, payout, share_code')
+    .eq('user_id', userId)
+    .eq('status', 'won')
+    .gt('payout', 0)
+    .gte('settled_at', since)
+    .order('settled_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(50);
+
+  if (error) return sendError(res, 'Could not load recent wins', 500);
+  if (!wins.length) return sendSuccess(res, []);
+
+  const { data: wallet, error: walletError } = await supabase.from('wallets')
+    .select('currency').eq('user_id', userId).single();
+  if (walletError || !wallet?.currency) return sendError(res, 'Could not load win currency', 500);
+
+  return sendSuccess(res, wins.reverse().map(bet => ({
+    betId: bet.id,
+    amount: Number(bet.payout),
+    currency: wallet.currency,
+    shareCode: bet.share_code ?? undefined,
+  })));
+});
+
 // GET /bets/:id
 router.get('/:id', async (req, res) => {
   const { data } = await supabase
