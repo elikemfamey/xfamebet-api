@@ -1,8 +1,9 @@
-import rateLimit, { type Store } from 'express-rate-limit';
+import rateLimit, { MemoryStore, type Options, type Store } from 'express-rate-limit';
 import { Request, Response } from 'express';
 import { env } from '../config/env';
 import { redis } from '../config/redis';
 import { sendError } from '../utils/response';
+import { logger } from '../utils/logger';
 
 const handler = (_req: Request, res: Response) => {
   sendError(res, 'Too many requests, please try again later.', 429);
@@ -15,21 +16,44 @@ const handler = (_req: Request, res: Response) => {
  */
 class RedisRateLimitStore implements Store {
   readonly prefix: string;
+  private usingFallback = false;
 
-  constructor(namespace: string, private readonly windowMs: number) {
+  constructor(namespace: string, private readonly windowMs: number, private readonly fallback?: MemoryStore) {
     this.prefix = `rate-limit:${namespace}:`;
   }
 
-  async increment(key: string) {
-    const redisKey = `${this.prefix}${key}`;
-    const result = await redis.eval(
-      "local hits = redis.call('INCR', KEYS[1]); if hits == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]); end; return { hits, redis.call('PTTL', KEYS[1]) };",
-      1,
-      redisKey,
-      this.windowMs,
-    ) as [number, number];
+  init(options: Options) {
+    this.fallback?.init(options);
+  }
 
-    return { totalHits: Number(result[0]), resetTime: new Date(Date.now() + Number(result[1])) };
+  async increment(key: string) {
+    if (this.fallback && redis.status !== 'ready') return this.incrementFallback(key, this.fallback);
+
+    const redisKey = `${this.prefix}${key}`;
+    try {
+      const result = await redis.eval(
+        "local hits = redis.call('INCR', KEYS[1]); if hits == 1 then redis.call('PEXPIRE', KEYS[1], ARGV[1]); end; return { hits, redis.call('PTTL', KEYS[1]) };",
+        1,
+        redisKey,
+        this.windowMs,
+      ) as [number, number];
+      if (this.usingFallback) {
+        this.usingFallback = false;
+        logger.info('General rate limiter restored its shared Redis store');
+      }
+      return { totalHits: Number(result[0]), resetTime: new Date(Date.now() + Number(result[1])) };
+    } catch (error) {
+      if (!this.fallback) throw error;
+      return this.incrementFallback(key, this.fallback);
+    }
+  }
+
+  private incrementFallback(key: string, fallback: MemoryStore) {
+    if (!this.usingFallback) {
+      this.usingFallback = true;
+      logger.warn('General rate limiter is using per-instance counters because Redis is unavailable');
+    }
+    return fallback.increment(key);
   }
 
   async decrement(key: string) {
@@ -49,7 +73,7 @@ class RedisRateLimitStore implements Store {
 export const generalLimiter = rateLimit({
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   max: env.RATE_LIMIT_MAX_REQUESTS,
-  store: new RedisRateLimitStore('general', env.RATE_LIMIT_WINDOW_MS),
+  store: new RedisRateLimitStore('general', env.RATE_LIMIT_WINDOW_MS, new MemoryStore()),
   standardHeaders: true,
   legacyHeaders: false,
   handler,
