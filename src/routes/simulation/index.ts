@@ -830,15 +830,17 @@ router.delete('/admin/leagues/:leagueId', authenticate, requireAdmin, async (req
 // ── Admin: monitoring dashboard ───────────────────────────────────────────────
 
 router.get('/admin/all', authenticate, requireAdmin, async (req, res) => {
-  const page  = parseInt(req.query.page as string) || 1;
-  const limit = 20;
+  const page  = Math.max(1, parseInt(req.query.page as string) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 20));
   const offset = (page - 1) * limit;
 
-  const { data, count } = await supabase.from('simulated_matches')
+  const { data, count, error } = await supabase.from('simulated_matches')
     .select('*', { count: 'exact' })
     .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
     .range(offset, offset + limit - 1);
 
+  if (error) return sendError(res, 'Failed to load simulations', 500);
   return sendPaginated(res, data ?? [], count ?? 0, page, limit);
 });
 
